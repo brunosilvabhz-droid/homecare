@@ -1,0 +1,38 @@
+import enum, uuid
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from sqlalchemy import String, Date, DateTime, ForeignKey, Text, Numeric, Boolean, Enum
+from sqlalchemy.orm import Mapped, mapped_column, relationship as orm_relationship
+from app.db.base import Base
+
+def uid(): return str(uuid.uuid4())
+def now(): return datetime.now(timezone.utc)
+class Role(str, enum.Enum): PROFESSIONAL="professional"; FAMILY="family"; ADMIN="admin"
+class VisitStatus(str, enum.Enum): SCHEDULED="scheduled"; COMPLETED="completed"; CANCELED="canceled"
+class SubscriptionStatus(str, enum.Enum): TRIAL="trial"; ACTIVE="active"; PAST_DUE="past_due"; CANCELED="canceled"
+class BillingCycle(str, enum.Enum): MONTHLY="monthly"; ANNUAL="annual"
+class TenantMixin:
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+class TimeMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+class Organization(Base, TimeMixin):
+    __tablename__="organizations"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); name: Mapped[str]=mapped_column(String(120))
+class User(Base, TenantMixin, TimeMixin):
+    __tablename__="users"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); name: Mapped[str]=mapped_column(String(120)); email: Mapped[str]=mapped_column(String(255), unique=True, index=True); password_hash: Mapped[str]=mapped_column(String(255)); role: Mapped[Role]=mapped_column(Enum(Role)); is_active: Mapped[bool]=mapped_column(Boolean, default=True); lgpd_consent_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+class Patient(Base, TenantMixin, TimeMixin):
+    __tablename__="patients"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); name: Mapped[str]=mapped_column(String(120)); birth_date: Mapped[date | None]=mapped_column(Date, nullable=True); phone: Mapped[str | None]=mapped_column(String(30), nullable=True); address: Mapped[str | None]=mapped_column(String(255), nullable=True); notes: Mapped[str | None]=mapped_column(Text, nullable=True); family_user_id: Mapped[str | None]=mapped_column(ForeignKey("users.id"), nullable=True)
+class Responsible(Base, TenantMixin, TimeMixin):
+    __tablename__="responsibles"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); patient_id: Mapped[str]=mapped_column(ForeignKey("patients.id")); name: Mapped[str]=mapped_column(String(120)); relationship: Mapped[str]=mapped_column(String(60)); phone: Mapped[str | None]=mapped_column(String(30),nullable=True); email: Mapped[str | None]=mapped_column(String(255),nullable=True); portal_user_id: Mapped[str | None]=mapped_column(ForeignKey("users.id"),nullable=True); patient: Mapped[Patient]=orm_relationship()
+class Visit(Base, TenantMixin, TimeMixin):
+    __tablename__="visits"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); patient_id: Mapped[str]=mapped_column(ForeignKey("patients.id")); professional_id: Mapped[str]=mapped_column(ForeignKey("users.id")); starts_at: Mapped[datetime]=mapped_column(DateTime(timezone=True)); duration_minutes: Mapped[int]=mapped_column(default=60); status: Mapped[VisitStatus]=mapped_column(Enum(VisitStatus), default=VisitStatus.SCHEDULED); notes: Mapped[str | None]=mapped_column(Text, nullable=True); patient: Mapped[Patient]=orm_relationship()
+class ServiceRecord(Base, TenantMixin, TimeMixin):
+    __tablename__="service_records"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); patient_id: Mapped[str]=mapped_column(ForeignKey("patients.id")); visit_id: Mapped[str | None]=mapped_column(ForeignKey("visits.id"), nullable=True); professional_id: Mapped[str]=mapped_column(ForeignKey("users.id")); occurred_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now); summary: Mapped[str]=mapped_column(Text); guidance: Mapped[str | None]=mapped_column(Text, nullable=True); responsible_name: Mapped[str | None]=mapped_column(String(120), nullable=True); signature_data: Mapped[str | None]=mapped_column(Text, nullable=True); patient: Mapped[Patient]=orm_relationship()
+class FinanceEntry(Base, TenantMixin, TimeMixin):
+    __tablename__="finance_entries"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); patient_id: Mapped[str | None]=mapped_column(ForeignKey("patients.id"), nullable=True); description: Mapped[str]=mapped_column(String(160)); amount: Mapped[Decimal]=mapped_column(Numeric(12,2)); due_date: Mapped[date]=mapped_column(Date); paid: Mapped[bool]=mapped_column(Boolean, default=False); patient: Mapped[Patient]=orm_relationship()
+class AuditLog(Base):
+    __tablename__="audit_logs"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); organization_id: Mapped[str]=mapped_column(String(36), index=True); user_id: Mapped[str]=mapped_column(String(36)); action: Mapped[str]=mapped_column(String(80)); resource: Mapped[str]=mapped_column(String(80)); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+class Plan(Base):
+    __tablename__="plans"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); code: Mapped[str]=mapped_column(String(40),unique=True); name: Mapped[str]=mapped_column(String(80)); monthly_price: Mapped[Decimal]=mapped_column(Numeric(12,2)); annual_monthly_price: Mapped[Decimal]=mapped_column(Numeric(12,2)); active: Mapped[bool]=mapped_column(Boolean,default=True)
+class Subscription(Base, TimeMixin):
+    __tablename__="subscriptions"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); organization_id: Mapped[str]=mapped_column(ForeignKey("organizations.id"),unique=True,index=True); plan_id: Mapped[str]=mapped_column(ForeignKey("plans.id")); status: Mapped[SubscriptionStatus]=mapped_column(Enum(SubscriptionStatus),default=SubscriptionStatus.TRIAL); billing_cycle: Mapped[BillingCycle]=mapped_column(Enum(BillingCycle),default=BillingCycle.MONTHLY); current_period_end: Mapped[date | None]=mapped_column(Date,nullable=True); gateway: Mapped[str | None]=mapped_column(String(40),nullable=True); external_id: Mapped[str | None]=mapped_column(String(120),nullable=True)
