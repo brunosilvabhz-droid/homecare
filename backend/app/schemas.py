@@ -32,7 +32,7 @@ class Message(BaseModel): message:str
 class EmailAction(BaseModel): email:EmailStr
 class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None
 class ResponsibleCreate(BaseModel): name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
-class PatientIn(BaseModel): name:str; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
+class PatientIn(BaseModel): name:str; status:str="active"; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
 class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
 class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
@@ -47,3 +47,6 @@ class SubscriptionOut(Out): id:str; status:str; billing_cycle:str; current_perio
 class VehicleIn(BaseModel): name:str; fuel_type:str="gasoline"; average_km_per_liter:Decimal=Field(gt=0); fuel_price:Decimal=Field(ge=0); additional_cost_per_km:Decimal=Field(ge=0,default=0); is_default:bool=False
 class VehicleOut(VehicleIn,Out): id:str; organization_id:str
 class RouteCalculate(BaseModel): date:date; vehicle_id:str; start_address:str; return_to_start:bool=True; optimize_order:bool=True
+class IntakeLinkCreate(BaseModel): expires_in_days:int=Field(default=7,ge=1,le=30)
+class IntakeSubmit(BaseModel):
+    patient_name:str=Field(min_length=3,max_length=120); birth_date:date|None=None; cpf:str|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; needs:str|None=None; mobility:str|None=None; additional_information:str|None=None; responsible_name:str=Field(min_length=3,max_length=120); responsible_relationship:str; responsible_phone:str; responsible_email:EmailStr|None=None; accept_privacy:bool

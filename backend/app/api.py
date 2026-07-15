@@ -1,4 +1,5 @@
-from datetime import datetime, timezone, time
+from datetime import datetime, timezone, time, timedelta
+import hashlib, secrets
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,7 +10,8 @@ from app.deps import current_user, professional, admin
 from app.core.security import hash_password, verify_password, create_token, decode_email_token
 from app.core.email import send_verification_email
 from app.core.routing import geocode, calculate_route, money
-from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle
+from app.core.config import settings
+from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest
 from app.schemas import *
 router=APIRouter()
 def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organization_id,user_id=user.id,action=action,resource=resource))
@@ -54,7 +56,7 @@ def me(user:User=Depends(current_user)): return user
 @router.get("/dashboard",response_model=Dashboard)
 def dashboard(user:User=Depends(professional),db:Session=Depends(get_db)):
     org=user.organization_id; start=datetime.now(timezone.utc)
-    patients=db.scalar(select(func.count()).select_from(Patient).where(Patient.organization_id==org)) or 0
+    patients=db.scalar(select(func.count()).select_from(Patient).where(Patient.organization_id==org,Patient.status=="active")) or 0
     upcoming=db.scalar(select(func.count()).select_from(Visit).where(Visit.organization_id==org,Visit.starts_at>=start,Visit.status==VisitStatus.SCHEDULED)) or 0
     revenue=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.paid.is_(True))) or Decimal(0)
     pending=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.paid.is_(False))) or Decimal(0)
@@ -129,6 +131,35 @@ def route_calculate(data:RouteCalculate,user:User=Depends(professional),db:Sessi
         else: return_cost+=cost
     total_km=Decimal(str(route["distance"]))/Decimal(1000); fuel_liters=total_km/Decimal(vehicle.average_km_per_liter); db.commit()
     return {"date":data.date,"vehicle":{"id":vehicle.id,"name":vehicle.name},"total_distance_km":round(float(total_km),2),"total_duration_minutes":round(route["duration"]/60),"estimated_fuel_liters":float(fuel_liters.quantize(Decimal("0.01"))),"fuel_cost":money(fuel_liters*Decimal(vehicle.fuel_price)),"additional_cost":money(total_km*Decimal(vehicle.additional_cost_per_km)),"total_cost":money(total_km*rate),"return_cost":money(return_cost),"stops":ordered_stops,"geometry":route["geometry"]}
+def intake_by_token(db:Session,token:str):
+    item=db.scalar(select(IntakeRequest).where(IntakeRequest.token_hash==hashlib.sha256(token.encode()).hexdigest()))
+    expires=item.expires_at.replace(tzinfo=timezone.utc) if item and item.expires_at.tzinfo is None else item.expires_at if item else None
+    if not item or expires<datetime.now(timezone.utc): raise HTTPException(404,"Link inválido ou expirado")
+    return item
+@router.post("/intakes",status_code=201)
+def create_intake_link(data:IntakeLinkCreate,user:User=Depends(professional),db:Session=Depends(get_db)):
+    token=secrets.token_urlsafe(32); item=IntakeRequest(organization_id=user.organization_id,created_by_id=user.id,token_hash=hashlib.sha256(token.encode()).hexdigest(),expires_at=datetime.now(timezone.utc)+timedelta(days=data.expires_in_days));db.add(item);audit(db,user,"create","intake_link");db.commit();db.refresh(item)
+    return {"id":item.id,"status":item.status,"expires_at":item.expires_at,"url":f"{settings.frontend_url.rstrip('/')}/avaliacao/{token}"}
+@router.get("/intakes")
+def list_intakes(user:User=Depends(professional),db:Session=Depends(get_db)):
+    items=db.scalars(select(IntakeRequest).where(IntakeRequest.organization_id==user.organization_id).order_by(IntakeRequest.created_at.desc())).all()
+    return [{"id":x.id,"status":x.status,"expires_at":x.expires_at,"submitted_at":x.submitted_at,"patient_id":x.patient_id,"patient_name":(x.family_data or {}).get("patient_name")} for x in items]
+@router.get("/public/intakes/{token}")
+def public_intake(token:str,db:Session=Depends(get_db)):
+    item=intake_by_token(db,token); creator=db.get(User,item.created_by_id)
+    return {"professional_name":creator.name,"status":item.status,"expires_at":item.expires_at}
+@router.post("/public/intakes/{token}",status_code=201)
+def submit_intake(token:str,data:IntakeSubmit,db:Session=Depends(get_db)):
+    item=intake_by_token(db,token)
+    if item.status!="pending": raise HTTPException(409,"Este formulário já foi enviado")
+    if not data.accept_privacy: raise HTTPException(422,"É necessário aceitar o aviso de privacidade")
+    values=data.model_dump(mode="json"); notes="\n\n".join(f"{label}: {values.get(field)}" for label,field in [("Condições informadas","conditions"),("Medicamentos","medications"),("Alergias","allergies"),("Necessidades","needs"),("Mobilidade","mobility"),("Informações adicionais","additional_information")] if values.get(field))
+    patient=Patient(organization_id=item.organization_id,status="inactive",name=data.patient_name,birth_date=data.birth_date,cpf=data.cpf,gender=data.gender,phone=data.phone,email=str(data.email) if data.email else None,postal_code=data.postal_code,address=data.address,address_number=data.address_number,address_complement=data.address_complement,neighborhood=data.neighborhood,city=data.city,state=data.state,notes=notes or None);db.add(patient);db.flush()
+    db.add(Responsible(organization_id=item.organization_id,patient_id=patient.id,name=data.responsible_name,relationship=data.responsible_relationship,phone=data.responsible_phone,email=str(data.responsible_email) if data.responsible_email else None));item.status="submitted";item.submitted_at=datetime.now(timezone.utc);item.patient_id=patient.id;item.family_data=values;db.commit()
+    return {"message":"Informações enviadas ao profissional com sucesso.","patient_id":patient.id}
+@router.post("/patients/{patient_id}/activate")
+def activate_patient(patient_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
+    patient=owned(db,Patient,patient_id,user);patient.status="active";audit(db,user,"activate","patient");db.commit();return {"message":"Paciente ativado com sucesso"}
 @router.get("/reports/summary")
 def report_summary(user:User=Depends(professional),db:Session=Depends(get_db)):
     org=user.organization_id

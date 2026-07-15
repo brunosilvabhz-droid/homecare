@@ -33,5 +33,15 @@ def test_tenant_flow(monkeypatch):
     monkeypatch.setattr("app.api.calculate_route",lambda points,roundtrip,optimize:{"order":[0,1],"route":{"distance":20000,"duration":1800,"legs":[{"distance":10000,"duration":900},{"distance":10000,"duration":900}],"geometry":{"type":"LineString","coordinates":[[-43.94,-19.92],[-43.93,-19.91]]}}})
     route=client.post("/api/v1/routes/calculate",json={"date":datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat(),"vehicle_id":vehicle.json()["id"],"start_address":"Belo Horizonte, MG","return_to_start":True,"optimize_order":True},headers=headers)
     assert route.status_code==200 and route.json()["total_distance_km"]==20.0
+    intake_link=client.post("/api/v1/intakes",json={"expires_in_days":7},headers=headers)
+    assert intake_link.status_code==201
+    intake_token=intake_link.json()["url"].rsplit("/",1)[-1]
+    assert client.get(f"/api/v1/public/intakes/{intake_token}").status_code==200
+    submitted=client.post(f"/api/v1/public/intakes/{intake_token}",json={"patient_name":"Zilda Souza","birth_date":"1950-01-01","phone":"31977777777","address":"Rua A","city":"Belo Horizonte","state":"MG","conditions":"Hipertensão","medications":"Losartana","needs":"Acompanhamento diário","responsible_name":"José Souza","responsible_relationship":"Filho","responsible_phone":"31966666666","accept_privacy":True})
+    assert submitted.status_code==201
+    inactive_id=submitted.json()["patient_id"]
+    patients=client.get("/api/v1/patients",headers=headers).json()
+    assert next(x for x in patients if x["id"]==inactive_id)["status"]=="inactive"
+    assert client.post(f"/api/v1/patients/{inactive_id}/activate",headers=headers).status_code==200
     subscription=client.get("/api/v1/billing/subscription",headers=headers)
     assert subscription.status_code==200 and subscription.json()["status"]=="trial"
