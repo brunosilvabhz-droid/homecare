@@ -64,7 +64,10 @@ def patients(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return db.scalars(q.order_by(Patient.name)).all()
 @router.post("/patients",response_model=PatientOut,status_code=201)
 def create_patient(data:PatientIn,user:User=Depends(professional),db:Session=Depends(get_db)):
-    item=Patient(**data.model_dump(),organization_id=user.organization_id); db.add(item); audit(db,user,"create","patient"); db.commit(); db.refresh(item); return item
+    values=data.model_dump(exclude={"responsible"}); item=Patient(**values,organization_id=user.organization_id); db.add(item); db.flush()
+    if data.responsible:
+        db.add(Responsible(**data.responsible.model_dump(),patient_id=item.id,organization_id=user.organization_id))
+    audit(db,user,"create","patient"); db.commit(); db.refresh(item); return item
 @router.get("/responsibles",response_model=list[ResponsibleOut])
 def responsibles(user:User=Depends(professional),db:Session=Depends(get_db)): return db.scalars(select(Responsible).where(Responsible.organization_id==user.organization_id).order_by(Responsible.name)).all()
 @router.post("/responsibles",response_model=ResponsibleOut,status_code=201)

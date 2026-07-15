@@ -31,7 +31,8 @@ class Token(BaseModel): access_token:str; token_type:str="bearer"
 class Message(BaseModel): message:str
 class EmailAction(BaseModel): email:EmailStr
 class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None
-class PatientIn(BaseModel): name:str; birth_date:date|None=None; phone:str|None=None; address:str|None=None; notes:str|None=None; family_user_id:str|None=None
+class ResponsibleCreate(BaseModel): name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
+class PatientIn(BaseModel): name:str; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
 class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
 class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
