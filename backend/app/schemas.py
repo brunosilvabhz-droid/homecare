@@ -1,12 +1,36 @@
 from datetime import date, datetime
 from decimal import Decimal
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from app.models import Role, VisitStatus
 class Out(BaseModel): model_config=ConfigDict(from_attributes=True)
-class Register(BaseModel): name:str; email:EmailStr; password:str; organization_name:str; accept_lgpd:bool
+PROFESSIONS={"nurse","nursing_technician","caregiver","physiotherapist","occupational_therapist","speech_therapist","nutritionist","psychologist","social_worker","physician","dentist","other"}
+class Register(BaseModel):
+    name:str=Field(min_length=3,max_length=120); email:EmailStr; password:str=Field(min_length=8,max_length=128); organization_name:str=Field(min_length=2,max_length=120); phone:str=Field(min_length=10,max_length=30); cpf:str=Field(min_length=11,max_length=14); profession:str; profession_other:str|None=None; council_name:str|None=None; council_code:str|None=None; council_state:str|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str=Field(min_length=2,max_length=100); state:str=Field(min_length=2,max_length=2); accept_lgpd:bool
+    @field_validator("profession")
+    @classmethod
+    def valid_profession(cls,value):
+        if value not in PROFESSIONS: raise ValueError("Profissão inválida")
+        return value
+    @field_validator("cpf")
+    @classmethod
+    def valid_cpf(cls,value):
+        digits="".join(filter(str.isdigit,value))
+        if len(digits)!=11 or len(set(digits))==1: raise ValueError("CPF inválido")
+        def digit(base):
+            total=sum(int(n)*w for n,w in zip(base,range(len(base)+1,1,-1)))
+            result=11-total%11
+            return "0" if result>=10 else str(result)
+        if digits[-2:] != digit(digits[:9])+digit(digits[:10]): raise ValueError("CPF inválido")
+        return digits
+    @model_validator(mode="after")
+    def other_required(self):
+        if self.profession=="other" and not self.profession_other: raise ValueError("Informe a profissão")
+        return self
 class Login(BaseModel): email:EmailStr; password:str
 class Token(BaseModel): access_token:str; token_type:str="bearer"
-class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str
+class Message(BaseModel): message:str
+class EmailAction(BaseModel): email:EmailStr
+class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None
 class PatientIn(BaseModel): name:str; birth_date:date|None=None; phone:str|None=None; address:str|None=None; notes:str|None=None; family_user_id:str|None=None
 class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
 class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None

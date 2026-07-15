@@ -5,7 +5,8 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.deps import current_user, professional, admin
-from app.core.security import hash_password, verify_password, create_token
+from app.core.security import hash_password, verify_password, create_token, decode_email_token
+from app.core.email import send_verification_email
 from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle
 from app.schemas import *
 router=APIRouter()
@@ -14,20 +15,37 @@ def owned(db,model,id,user):
     item=db.scalar(select(model).where(model.id==id,model.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Recurso não encontrado")
     return item
-@router.post("/auth/register",response_model=Token,status_code=201)
+@router.post("/auth/register",response_model=Message,status_code=201)
 def register(data:Register,db:Session=Depends(get_db)):
     if not data.accept_lgpd: raise HTTPException(422,"É necessário aceitar o consentimento de privacidade")
     if db.scalar(select(User).where(User.email==data.email.lower())): raise HTTPException(409,"E-mail já cadastrado")
     org=Organization(name=data.organization_name); db.add(org); db.flush()
-    user=User(name=data.name,email=data.email.lower(),password_hash=hash_password(data.password),role=Role.PROFESSIONAL,organization_id=org.id)
+    profile=data.model_dump(exclude={"organization_name","password","accept_lgpd"})
+    profile["email"]=str(data.email).lower(); profile["state"]=data.state.upper()
+    if profile.get("council_state"): profile["council_state"]=profile["council_state"].upper()
+    user=User(**profile,password_hash=hash_password(data.password),role=Role.PROFESSIONAL,organization_id=org.id)
     db.add(user); plan=db.scalar(select(Plan).where(Plan.code=="pro"))
     if not plan:
         plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
-    db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY)); db.commit(); return Token(access_token=create_token(user.id))
+    db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY)); db.commit()
+    send_verification_email(user.id,user.email)
+    return Message(message="Cadastro realizado. Verifique seu e-mail para ativar a conta.")
+@router.get("/auth/verify-email",response_model=Message)
+def verify_email(token:str,db:Session=Depends(get_db)):
+    user_id=decode_email_token(token); user=db.get(User,user_id) if user_id else None
+    if not user: raise HTTPException(400,"Link de confirmação inválido ou expirado")
+    if user.email_verified_at is None: user.email_verified_at=datetime.now(timezone.utc); db.commit()
+    return Message(message="E-mail confirmado com sucesso. Você já pode entrar.")
+@router.post("/auth/resend-verification",response_model=Message)
+def resend_verification(data:EmailAction,db:Session=Depends(get_db)):
+    user=db.scalar(select(User).where(User.email==str(data.email).lower()))
+    if user and user.email_verified_at is None: send_verification_email(user.id,user.email)
+    return Message(message="Se houver uma conta pendente, enviaremos um novo link de confirmação.")
 @router.post("/auth/login",response_model=Token)
 def login(data:Login,db:Session=Depends(get_db)):
     user=db.scalar(select(User).where(User.email==data.email.lower()))
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"E-mail ou senha inválidos")
+    if user.email_verified_at is None: raise HTTPException(403,"Confirme seu e-mail antes de entrar")
     return Token(access_token=create_token(user.id))
 @router.get("/me",response_model=UserOut)
 def me(user:User=Depends(current_user)): return user
