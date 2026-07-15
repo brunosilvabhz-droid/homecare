@@ -32,7 +32,7 @@ class Message(BaseModel): message:str
 class EmailAction(BaseModel): email:EmailStr
 class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None
 class ResponsibleCreate(BaseModel): name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
-class PatientIn(BaseModel): name:str; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
+class PatientIn(BaseModel): name:str; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
 class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
 class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
@@ -44,3 +44,6 @@ class FinanceIn(BaseModel): patient_id:str|None=None; description:str; amount:De
 class FinanceOut(FinanceIn, Out): id:str; patient:PatientOut|None=None
 class Dashboard(BaseModel): patients:int; upcoming_visits:int; monthly_revenue:Decimal; pending_amount:Decimal
 class SubscriptionOut(Out): id:str; status:str; billing_cycle:str; current_period_end:date|None; gateway:str|None
+class VehicleIn(BaseModel): name:str; fuel_type:str="gasoline"; average_km_per_liter:Decimal=Field(gt=0); fuel_price:Decimal=Field(ge=0); additional_cost_per_km:Decimal=Field(ge=0,default=0); is_default:bool=False
+class VehicleOut(VehicleIn,Out): id:str; organization_id:str
+class RouteCalculate(BaseModel): date:date; vehicle_id:str; start_address:str; return_to_start:bool=True; optimize_order:bool=True

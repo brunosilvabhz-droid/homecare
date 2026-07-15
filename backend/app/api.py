@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
@@ -7,7 +8,8 @@ from app.db.session import get_db
 from app.deps import current_user, professional, admin
 from app.core.security import hash_password, verify_password, create_token, decode_email_token
 from app.core.email import send_verification_email
-from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle
+from app.core.routing import geocode, calculate_route, money
+from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle
 from app.schemas import *
 router=APIRouter()
 def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organization_id,user_id=user.id,action=action,resource=resource))
@@ -95,6 +97,38 @@ def finance(user:User=Depends(professional),db:Session=Depends(get_db)): return 
 def create_finance(data:FinanceIn,user:User=Depends(professional),db:Session=Depends(get_db)):
     if data.patient_id: owned(db,Patient,data.patient_id,user)
     item=FinanceEntry(**data.model_dump(),organization_id=user.organization_id); db.add(item); audit(db,user,"create","finance"); db.commit(); db.refresh(item); return item
+@router.get("/vehicles",response_model=list[VehicleOut])
+def vehicles(user:User=Depends(professional),db:Session=Depends(get_db)):
+    return db.scalars(select(Vehicle).where(Vehicle.organization_id==user.organization_id).order_by(Vehicle.is_default.desc(),Vehicle.name)).all()
+@router.post("/vehicles",response_model=VehicleOut,status_code=201)
+def create_vehicle(data:VehicleIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+    if data.is_default: db.query(Vehicle).filter(Vehicle.organization_id==user.organization_id).update({Vehicle.is_default:False})
+    item=Vehicle(**data.model_dump(),organization_id=user.organization_id); db.add(item); audit(db,user,"create","vehicle"); db.commit(); db.refresh(item); return item
+@router.post("/routes/calculate")
+def route_calculate(data:RouteCalculate,user:User=Depends(professional),db:Session=Depends(get_db)):
+    vehicle=owned(db,Vehicle,data.vehicle_id,user)
+    local_tz=ZoneInfo("America/Sao_Paulo"); start=datetime.combine(data.date,time.min,tzinfo=local_tz).astimezone(timezone.utc); end=datetime.combine(data.date,time.max,tzinfo=local_tz).astimezone(timezone.utc)
+    visits=db.scalars(select(Visit).join(Patient).where(Visit.organization_id==user.organization_id,Visit.starts_at>=start,Visit.starts_at<=end,Visit.status==VisitStatus.SCHEDULED).order_by(Visit.starts_at)).all()
+    if not visits: raise HTTPException(422,"Não há visitas agendadas para esta data")
+    start_point=geocode(data.start_address); points=[start_point]; stops=[]
+    for visit in visits:
+        patient=visit.patient
+        if patient.latitude is None or patient.longitude is None:
+            address=", ".join(filter(None,[patient.address,patient.address_number,patient.neighborhood,patient.city,patient.state,"Brasil"]))
+            if not patient.address or not patient.city: raise HTTPException(422,f"Complete o endereço de {patient.name}")
+            patient.latitude,patient.longitude=geocode(address)
+        points.append((patient.latitude,patient.longitude)); stops.append({"input_index":len(points)-1,"visit_id":visit.id,"patient_id":patient.id,"patient_name":patient.name,"scheduled_at":visit.starts_at,"duration_minutes":visit.duration_minutes,"address":", ".join(filter(None,[patient.address,patient.address_number,patient.city,patient.state]))})
+    route_points=points if data.optimize_order or not data.return_to_start else points+[start_point]
+    calculated=calculate_route(route_points,data.return_to_start,data.optimize_order); route=calculated["route"]; order=calculated["order"]
+    rate=Decimal(vehicle.fuel_price)/Decimal(vehicle.average_km_per_liter)+Decimal(vehicle.additional_cost_per_km); ordered_stops=[]; return_cost=Decimal(0)
+    stop_by_index={stop["input_index"]:stop for stop in stops}
+    for leg_index,leg in enumerate(route["legs"]):
+        destination=order[(leg_index+1)%len(order)] if data.optimize_order else leg_index+1
+        cost=money(Decimal(str(leg["distance"]))/Decimal(1000)*rate)
+        if destination in stop_by_index: ordered_stops.append({**stop_by_index[destination],"leg_distance_km":round(leg["distance"]/1000,2),"leg_duration_minutes":round(leg["duration"]/60),"leg_cost":cost})
+        else: return_cost+=cost
+    total_km=Decimal(str(route["distance"]))/Decimal(1000); fuel_liters=total_km/Decimal(vehicle.average_km_per_liter); db.commit()
+    return {"date":data.date,"vehicle":{"id":vehicle.id,"name":vehicle.name},"total_distance_km":round(float(total_km),2),"total_duration_minutes":round(route["duration"]/60),"estimated_fuel_liters":float(fuel_liters.quantize(Decimal("0.01"))),"fuel_cost":money(fuel_liters*Decimal(vehicle.fuel_price)),"additional_cost":money(total_km*Decimal(vehicle.additional_cost_per_km)),"total_cost":money(total_km*rate),"return_cost":money(return_cost),"stops":ordered_stops,"geometry":route["geometry"]}
 @router.get("/reports/summary")
 def report_summary(user:User=Depends(professional),db:Session=Depends(get_db)):
     org=user.organization_id

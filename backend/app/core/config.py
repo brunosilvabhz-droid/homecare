@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_from_email: str = "nao-responda@impactocg.com"
     smtp_use_tls: bool = True
+    geocoder_url: str = "https://nominatim.openstreetmap.org"
+    routing_url: str = "https://router.project-osrm.org"
+    map_user_agent: str = "ImpactoCare/0.1 contato@impactocg.com"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     @property
     def origins(self): return [x.strip() for x in self.cors_origins.split(",")]
