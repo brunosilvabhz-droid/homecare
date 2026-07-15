@@ -1,5 +1,5 @@
 import os
-os.environ["DATABASE_URL"]="sqlite:///./test_homecare.db"
+os.environ["DATABASE_URL"]="sqlite:///./test_impactocare.db"
 from fastapi.testclient import TestClient
 from app.db.base import Base
 from app.db.session import engine

@@ -22,7 +22,7 @@ def register(data:Register,db:Session=Depends(get_db)):
     user=User(name=data.name,email=data.email.lower(),password_hash=hash_password(data.password),role=Role.PROFESSIONAL,organization_id=org.id)
     db.add(user); plan=db.scalar(select(Plan).where(Plan.code=="pro"))
     if not plan:
-        plan=Plan(code="pro",name="HomeCare Pro",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
+        plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
     db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY)); db.commit(); return Token(access_token=create_token(user.id))
 @router.post("/auth/login",response_model=Token)
 def login(data:Login,db:Session=Depends(get_db)):

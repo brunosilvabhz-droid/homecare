@@ -2,9 +2,9 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    app_name: str = "HomeCare Pro"
+    app_name: str = "Impacto Care"
     api_prefix: str = "/api/v1"
-    database_url: str = "sqlite:///./homecare.db"
+    database_url: str = "sqlite:///./impactocare.db"
     jwt_secret: str = "dev-secret-change-me-with-32-characters"
     access_token_expire_minutes: int = 480
     cors_origins: str = "http://localhost:5173"

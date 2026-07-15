@@ -1,0 +1,21 @@
+# Sentinela (domínios existentes)
+app.impactocg.com {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:5173
+}
+
+api.impactocg.com {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:8000
+}
+
+# Impacto Care
+care.impactocg.com {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:5180
+}
+
+api-care.impactocg.com {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:8010
+}

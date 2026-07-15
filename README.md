@@ -1,4 +1,4 @@
-# HomeCare Pro
+# Impacto Care
 
 SaaS multi-tenant de gestão para profissionais de atendimento domiciliar. O MVP reúne pacientes, responsáveis, agenda, registros de atendimento, aceite simples do responsável, portal da família, financeiro, relatórios dinâmicos, billing preparado e painel administrativo.
 
@@ -56,3 +56,8 @@ frontend/src/      landing, autenticação e módulos do painel
 4. Publicidade, somente após escala e consentimento adequado.
 
 O catálogo, publicidade e cobrança automática não fazem parte deste MVP.
+
+
+## Sentinela na mesma VPS
+
+O guia completo de portas, domínios, Caddy, backups e atualização conjunta está em [`deploy/DEPLOY_DUAL.md`](deploy/DEPLOY_DUAL.md).
