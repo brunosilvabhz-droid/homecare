@@ -43,5 +43,16 @@ def test_tenant_flow(monkeypatch):
     patients=client.get("/api/v1/patients",headers=headers).json()
     assert next(x for x in patients if x["id"]==inactive_id)["status"]=="inactive"
     assert client.post(f"/api/v1/patients/{inactive_id}/activate",headers=headers).status_code==200
+    subscription_id=client.get("/api/v1/billing/subscription",headers=headers).json()["id"]
+    monkeypatch.setattr("app.api.create_asaas_checkout",lambda payload:{"id":"checkout_test_123"})
+    checkout=client.post("/api/v1/billing/checkout",json={"billing_cycle":"annual"},headers=headers)
+    assert checkout.status_code==200 and "checkout_test_123" in checkout.json()["checkout_url"]
+    monkeypatch.setattr("app.api.settings.asaas_webhook_token","webhook-token-seguro-com-mais-de-32-caracteres")
+    event={"id":"evt_test_1","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"subscription":"sub_test_1"}}
+    webhook=client.post("/api/v1/webhooks/asaas",json=event,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"})
+    assert webhook.status_code==200
+    assert client.get("/api/v1/billing/subscription",headers=headers).json()["status"]=="active"
+    duplicate=client.post("/api/v1/webhooks/asaas",json=event,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"})
+    assert duplicate.json()["duplicate"] is True
     subscription=client.get("/api/v1/billing/subscription",headers=headers)
-    assert subscription.status_code==200 and subscription.json()["status"]=="trial"
+    assert subscription.status_code==200 and subscription.json()["status"]=="active"

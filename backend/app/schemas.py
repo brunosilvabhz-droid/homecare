@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
-from app.models import Role, VisitStatus
+from app.models import Role, VisitStatus, BillingCycle
 class Out(BaseModel): model_config=ConfigDict(from_attributes=True)
 PROFESSIONS={"nurse","nursing_technician","caregiver","physiotherapist","occupational_therapist","speech_therapist","nutritionist","psychologist","social_worker","physician","dentist","other"}
 class Register(BaseModel):
@@ -50,3 +50,4 @@ class RouteCalculate(BaseModel): date:date; vehicle_id:str; start_address:str; r
 class IntakeLinkCreate(BaseModel): expires_in_days:int=Field(default=7,ge=1,le=30)
 class IntakeSubmit(BaseModel):
     patient_name:str=Field(min_length=3,max_length=120); birth_date:date|None=None; cpf:str|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; needs:str|None=None; mobility:str|None=None; additional_information:str|None=None; responsible_name:str=Field(min_length=3,max_length=120); responsible_relationship:str; responsible_phone:str; responsible_email:EmailStr|None=None; accept_privacy:bool
+class CheckoutCreate(BaseModel): billing_cycle:BillingCycle

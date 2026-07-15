@@ -1,8 +1,9 @@
 from datetime import datetime, timezone, time, timedelta
 import hashlib, secrets
+import json
 from zoneinfo import ZoneInfo
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -11,7 +12,8 @@ from app.core.security import hash_password, verify_password, create_token, deco
 from app.core.email import send_verification_email
 from app.core.routing import geocode, calculate_route, money
 from app.core.config import settings
-from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest
+from app.core.billing import create_asaas_checkout
+from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent
 from app.schemas import *
 router=APIRouter()
 def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organization_id,user_id=user.id,action=action,resource=resource))
@@ -31,7 +33,7 @@ def register(data:Register,db:Session=Depends(get_db)):
     db.add(user); plan=db.scalar(select(Plan).where(Plan.code=="pro"))
     if not plan:
         plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
-    db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY)); db.commit()
+    db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=30)).date())); db.commit()
     send_verification_email(user.id,user.email)
     return Message(message="Cadastro realizado. Verifique seu e-mail para ativar a conta.")
 @router.get("/auth/verify-email",response_model=Message)
@@ -171,6 +173,31 @@ def subscription(user:User=Depends(professional),db:Session=Depends(get_db)):
     if not item: raise HTTPException(404,"Assinatura não encontrada")
     plan=db.get(Plan,item.plan_id)
     return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price},"gateway":item.gateway}
+@router.post("/billing/checkout")
+def billing_checkout(data:CheckoutCreate,user:User=Depends(professional),db:Session=Depends(get_db)):
+    item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id)); plan=db.get(Plan,item.plan_id) if item else None
+    if not item or not plan: raise HTTPException(404,"Assinatura não encontrada")
+    first_due=item.current_period_end if item.status==SubscriptionStatus.TRIAL and item.current_period_end and item.current_period_end>datetime.now(timezone.utc).date() else datetime.now(timezone.utc).date()
+    annual=data.billing_cycle==BillingCycle.ANNUAL; value=Decimal(plan.annual_monthly_price)*12 if annual else Decimal(plan.monthly_price); cycle="YEARLY" if annual else "MONTHLY"
+    payload={"billingTypes":["CREDIT_CARD"],"chargeTypes":["RECURRENT"],"minutesToExpire":60,"externalReference":item.id,"callback":{"successUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=success","cancelUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=cancel","expiredUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=expired"},"items":[{"name":f"Impacto Care - {'Anual' if annual else 'Mensal'}","description":"Plataforma de gestão para profissionais de atendimento domiciliar","quantity":1,"value":float(value)}],"subscription":{"cycle":cycle,"nextDueDate":first_due.isoformat()}}
+    checkout=create_asaas_checkout(payload); checkout_id=checkout.get("id")
+    if not checkout_id: raise HTTPException(502,"Resposta inválida do ASAAS")
+    item.gateway="asaas";item.external_id=checkout_id;item.billing_cycle=data.billing_cycle;db.commit()
+    return {"checkout_url":checkout.get("link") or f"{settings.asaas_checkout_url}?id={checkout_id}","expires_in_minutes":60}
+@router.post("/webhooks/asaas")
+def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-access-token"),db:Session=Depends(get_db)):
+    if not settings.asaas_webhook_token or not asaas_token or not secrets.compare_digest(asaas_token,settings.asaas_webhook_token): raise HTTPException(401,"Webhook não autorizado")
+    event_type=str(payload.get("event","")).upper(); payment=payload.get("payment") or {}; event_id=str(payload.get("id") or hashlib.sha256(json.dumps(payload,sort_keys=True,default=str).encode()).hexdigest())
+    if db.scalar(select(BillingWebhookEvent).where(BillingWebhookEvent.event_id==event_id)): return {"received":True,"duplicate":True}
+    db.add(BillingWebhookEvent(gateway="asaas",event_id=event_id,event_type=event_type,payload=payload))
+    reference=payment.get("externalReference") or payload.get("externalReference"); item=db.get(Subscription,reference) if reference else None
+    if item:
+        if event_type in {"PAYMENT_RECEIVED","PAYMENT_CONFIRMED"}:
+            item.status=SubscriptionStatus.ACTIVE;days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
+        elif event_type in {"PAYMENT_OVERDUE","PAYMENT_DUNNING_REQUESTED"}: item.status=SubscriptionStatus.PAST_DUE
+        elif event_type in {"PAYMENT_REFUNDED","PAYMENT_DELETED"}: item.status=SubscriptionStatus.CANCELED
+        if payment.get("subscription"): item.external_id=payment["subscription"]
+    db.commit();return {"received":True}
 @router.get("/admin/overview")
 def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
     return {"organizations":db.scalar(select(func.count()).select_from(Organization)),"users":db.scalar(select(func.count()).select_from(User)),"patients":db.scalar(select(func.count()).select_from(Patient))}

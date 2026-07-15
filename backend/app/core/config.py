@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     geocoder_url: str = "https://nominatim.openstreetmap.org"
     routing_url: str = "https://router.project-osrm.org"
     map_user_agent: str = "ImpactoCare/0.1 contato@impactocg.com"
+    asaas_api_url: str = "https://api-sandbox.asaas.com/v3"
+    asaas_api_key: str | None = None
+    asaas_checkout_url: str = "https://sandbox.asaas.com/checkoutSession/show"
+    asaas_webhook_token: str | None = None
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     @property
     def origins(self): return [x.strip() for x in self.cors_origins.split(",")]
