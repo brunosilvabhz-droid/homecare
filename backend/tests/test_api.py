@@ -96,15 +96,19 @@ def test_tenant_flow(monkeypatch):
     pix_checkout=client.post("/api/v1/billing/checkout",json={"billing_cycle":"monthly","payment_method":"pix"},headers=headers)
     assert pix_checkout.status_code==200
     assert checkout_payloads[-1]["billingTypes"]==["PIX"]
-    assert checkout_payloads[-1]["chargeTypes"]==["RECURRENT"]
-    assert checkout_payloads[-1]["subscription"]["cycle"]=="MONTHLY"
+    assert checkout_payloads[-1]["chargeTypes"]==["DETACHED"]
+    assert "subscription" not in checkout_payloads[-1]
     monkeypatch.setattr("app.api.settings.asaas_webhook_token","webhook-token-seguro-com-mais-de-32-caracteres")
-    event={"id":"evt_test_1","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"subscription":"sub_test_1"}}
+    event={"id":"evt_test_1","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"billingType":"PIX"}}
     webhook=client.post("/api/v1/webhooks/asaas",json=event,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"})
     assert webhook.status_code==200
     assert client.get("/api/v1/billing/subscription",headers=headers).json()["status"]=="active"
     duplicate=client.post("/api/v1/webhooks/asaas",json=event,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"})
     assert duplicate.json()["duplicate"] is True
+    period_end=client.get("/api/v1/billing/subscription",headers=headers).json()["current_period_end"]
+    card_received={"id":"evt_test_card_received","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"billingType":"CREDIT_CARD","subscription":"sub_test_1"}}
+    assert client.post("/api/v1/webhooks/asaas",json=card_received,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"}).status_code==200
+    assert client.get("/api/v1/billing/subscription",headers=headers).json()["current_period_end"]==period_end
     subscription=client.get("/api/v1/billing/subscription",headers=headers)
     assert subscription.status_code==200 and subscription.json()["status"]=="active"
     with SessionLocal() as db:

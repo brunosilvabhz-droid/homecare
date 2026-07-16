@@ -283,7 +283,8 @@ def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional)
     first_due=item.current_period_end if item.status==SubscriptionStatus.TRIAL and item.current_period_end and item.current_period_end>datetime.now(timezone.utc).date() else datetime.now(timezone.utc).date()
     annual=data.billing_cycle==BillingCycle.ANNUAL; value=Decimal(plan.annual_monthly_price)*12 if annual else Decimal(plan.monthly_price); cycle="YEARLY" if annual else "MONTHLY"
     billing_type="PIX" if data.payment_method=="pix" else "CREDIT_CARD"
-    payload={"billingTypes":[billing_type],"chargeTypes":["RECURRENT"],"minutesToExpire":60,"externalReference":item.id,"callback":{"successUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=success","cancelUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=cancel","expiredUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=expired"},"items":[{"name":f"Impacto Care - {'Anual' if annual else 'Mensal'}","description":"Plataforma de gestão para profissionais de atendimento domiciliar","quantity":1,"value":float(value)}],"subscription":{"cycle":cycle,"nextDueDate":first_due.isoformat()}}
+    payload={"billingTypes":[billing_type],"chargeTypes":["DETACHED" if data.payment_method=="pix" else "RECURRENT"],"minutesToExpire":60,"externalReference":item.id,"callback":{"successUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=success","cancelUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=cancel","expiredUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=expired"},"items":[{"name":f"Impacto Care - {'Anual' if annual else 'Mensal'}","description":"Plataforma de gestão para profissionais de atendimento domiciliar","quantity":1,"value":float(value)}]}
+    if data.payment_method!="pix": payload["subscription"]={"cycle":cycle,"nextDueDate":first_due.isoformat()}
     checkout=create_asaas_checkout(payload); checkout_id=checkout.get("id")
     if not checkout_id: raise HTTPException(502,"Resposta inválida do ASAAS")
     item.gateway="asaas";item.external_id=checkout_id;item.billing_cycle=data.billing_cycle;db.commit()
@@ -296,7 +297,9 @@ def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-acc
     db.add(BillingWebhookEvent(gateway="asaas",event_id=event_id,event_type=event_type,payload=payload))
     reference=payment.get("externalReference") or payload.get("externalReference"); item=db.get(Subscription,reference) if reference else None
     if item:
-        if event_type in {"PAYMENT_RECEIVED","PAYMENT_CONFIRMED"}:
+        billing_type=str(payment.get("billingType") or "").upper()
+        payment_activates=event_type=="PAYMENT_CONFIRMED" or (event_type=="PAYMENT_RECEIVED" and billing_type!="CREDIT_CARD")
+        if payment_activates:
             item.status=SubscriptionStatus.ACTIVE;days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
         elif event_type in {"PAYMENT_OVERDUE","PAYMENT_DUNNING_REQUESTED"}: item.status=SubscriptionStatus.PAST_DUE
         elif event_type in {"PAYMENT_REFUNDED","PAYMENT_DELETED"}: item.status=SubscriptionStatus.CANCELED
