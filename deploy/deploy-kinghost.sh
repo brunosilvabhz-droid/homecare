@@ -34,7 +34,7 @@ echo "[6/7] Conferindo containers e migrações"
 "${COMPOSE[@]}" exec -T api alembic current
 
 echo "[7/7] Verificando a API e o frontend"
-curl --fail --silent --show-error --retry 12 --retry-delay 5 http://127.0.0.1:8010/health
-curl --fail --silent --show-error --head --retry 12 --retry-delay 5 http://127.0.0.1:5180 >/dev/null
+curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors http://127.0.0.1:8010/health
+curl --fail --silent --show-error --head --retry 12 --retry-delay 5 --retry-all-errors http://127.0.0.1:5180 >/dev/null
 
 echo "Deploy concluído. Backup: $BACKUP_DIR/impacto-care-$timestamp.dump"
