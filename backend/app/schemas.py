@@ -27,7 +27,7 @@ class Register(BaseModel):
     def other_required(self):
         if self.profession=="other" and not self.profession_other: raise ValueError("Informe a profissão")
         return self
-class Login(BaseModel): email:EmailStr; password:str
+class Login(BaseModel): email:EmailStr; password:str; captcha_token:str|None=None
 class Token(BaseModel): access_token:str; token_type:str="bearer"
 class Message(BaseModel): message:str
 class SupportTicketIn(BaseModel): category:Literal["error","question","suggestion","request"]; description:str=Field(min_length=10,max_length=5000)

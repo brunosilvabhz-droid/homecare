@@ -6,7 +6,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from zoneinfo import ZoneInfo
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -15,6 +15,7 @@ from app.core.security import hash_password, verify_password, create_token, deco
 from app.core.email import send_verification_email, send_password_reset_email, send_support_ticket_email
 from app.core.routing import geocode, calculate_route, money
 from app.core.config import settings
+from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout
 from app.core.subscriptions import subscription_access
 from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent
@@ -58,7 +59,10 @@ def resend_verification(data:EmailAction,db:Session=Depends(get_db)):
     if user and user.email_verified_at is None: send_verification_email(user.id,user.email)
     return Message(message="Se houver uma conta pendente, enviaremos um novo link de confirmação.")
 @router.post("/auth/login",response_model=Token)
-def login(data:Login,db:Session=Depends(get_db)):
+def login(data:Login,request:Request,db:Session=Depends(get_db)):
+    remote_ip=request.client.host if request.client else None
+    if not verify_turnstile(data.captcha_token,remote_ip):
+        raise HTTPException(400,"Não foi possível validar a verificação de segurança. Tente novamente.")
     user=db.scalar(select(User).where(User.email==data.email.lower()))
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"E-mail ou senha inválidos")
     if user.email_verified_at is None: raise HTTPException(403,"Confirme seu e-mail antes de entrar")
