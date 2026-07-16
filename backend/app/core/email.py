@@ -68,3 +68,21 @@ def send_plan_expiration_email(email:str,name:str,period_end:str,reminder_type:s
         if settings.smtp_username: smtp.login(settings.smtp_username,settings.smtp_password or "")
         smtp.send_message(message)
     return True
+
+def send_visit_change_email(email:str,professional_name:str,patient_name:str,action:str,old_starts_at:str,new_starts_at:str|None=None)->bool:
+    if not settings.smtp_host:
+        logger.warning("SMTP não configurado. Alteração de agendamento de %s não enviada",patient_name)
+        return False
+    labels={"cancel":"cancelou","reschedule":"reagendou"}; label=labels[action]
+    message=EmailMessage();message["Subject"]=f"Agendamento {label} — {patient_name}";message["From"]=settings.smtp_from_email;message["To"]=email
+    detail=f"Horário anterior: {old_starts_at}."+(f"\nNovo horário: {new_starts_at}." if new_starts_at else "")
+    message.set_content(f"Olá, {professional_name}.\n\n{patient_name} {label} o atendimento pelo link de confirmação.\n\n{detail}\n\nSua agenda no Impacto Care já foi atualizada.")
+    try:
+        with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=15) as smtp:
+            if settings.smtp_use_tls: smtp.starttls()
+            if settings.smtp_username: smtp.login(settings.smtp_username,settings.smtp_password or "")
+            smtp.send_message(message)
+        return True
+    except Exception:
+        logger.exception("Falha ao enviar alteração de agendamento para %s",email)
+        return False

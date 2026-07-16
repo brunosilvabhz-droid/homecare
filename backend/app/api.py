@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, time, timedelta
+from datetime import date, datetime, timezone, time, timedelta
 import hashlib, secrets
 import json
 import logging
@@ -12,13 +12,13 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.deps import current_user, professional, account_professional, admin
 from app.core.security import hash_password, verify_password, create_token, decode_email_token, decode_password_reset_token
-from app.core.email import send_verification_email, send_password_reset_email, send_support_ticket_email
+from app.core.email import send_verification_email, send_password_reset_email, send_support_ticket_email, send_visit_change_email
 from app.core.routing import geocode, calculate_route, money
 from app.core.config import settings
 from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout
 from app.core.subscriptions import subscription_access
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability
 from app.schemas import *
 router=APIRouter()
 def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organization_id,user_id=user.id,action=action,resource=resource))
@@ -26,6 +26,18 @@ def owned(db,model,id,user):
     item=db.scalar(select(model).where(model.id==id,model.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Recurso não encontrado")
     return item
+LOCAL_TZ=ZoneInfo("America/Sao_Paulo")
+def visit_by_token(db:Session,token:str):
+    item=db.scalar(select(Visit).where(Visit.confirmation_token_hash==hashlib.sha256(token.encode()).hexdigest()))
+    if not item: raise HTTPException(404,"Link de agendamento inválido")
+    return item
+def slot_is_available(db:Session,visit:Visit,starts_at:datetime,duration:int)->bool:
+    local=starts_at.astimezone(LOCAL_TZ); end=local+timedelta(minutes=duration)
+    windows=db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==visit.professional_id,ProfessionalAvailability.weekday==local.weekday(),ProfessionalAvailability.is_active.is_(True))).all()
+    if not any(local.time()>=w.start_time and end.time()<=w.end_time and local.date()==end.date() for w in windows): return False
+    utc_start=local.astimezone(timezone.utc);utc_end=end.astimezone(timezone.utc)
+    conflicts=db.scalars(select(Visit).where(Visit.professional_id==visit.professional_id,Visit.id!=visit.id,Visit.status!=VisitStatus.CANCELED,Visit.starts_at<utc_end)).all()
+    return not any((other.starts_at+timedelta(minutes=other.duration_minutes))>utc_start for other in conflicts)
 def sync_patient_finance(db:Session,patient:Patient):
     db.query(FinanceEntry).filter(FinanceEntry.organization_id==patient.organization_id,FinanceEntry.patient_id==patient.id,FinanceEntry.source=="patient_sessions",FinanceEntry.paid.is_(False)).delete()
     paid=db.scalar(select(func.count()).select_from(FinanceEntry).where(FinanceEntry.patient_id==patient.id,FinanceEntry.source=="patient_sessions",FinanceEntry.paid.is_(True))) or 0
@@ -182,6 +194,59 @@ def visits(user:User=Depends(current_user),db:Session=Depends(get_db)):
 @router.post("/visits",response_model=VisitOut,status_code=201)
 def create_visit(data:VisitIn,user:User=Depends(professional),db:Session=Depends(get_db)):
     owned(db,Patient,data.patient_id,user); item=Visit(**data.model_dump(),professional_id=user.id,organization_id=user.organization_id); db.add(item); audit(db,user,"create","visit"); db.commit(); db.refresh(item); return item
+@router.get("/availability",response_model=AvailabilityOut)
+def get_availability(user:User=Depends(professional),db:Session=Depends(get_db)):
+    windows=db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==user.id).order_by(ProfessionalAvailability.weekday,ProfessionalAvailability.start_time)).all()
+    return AvailabilityOut(default_session_duration_minutes=user.default_session_duration_minutes,windows=windows)
+@router.put("/availability",response_model=AvailabilityOut)
+def save_availability(data:AvailabilitySettings,user:User=Depends(professional),db:Session=Depends(get_db)):
+    grouped={}
+    for window in data.windows:
+        if window.start_time>=window.end_time: raise HTTPException(422,"O horário inicial deve ser anterior ao final")
+        grouped.setdefault(window.weekday,[]).append(window)
+    for windows in grouped.values():
+        ordered=sorted(windows,key=lambda x:x.start_time)
+        if any(a.end_time>b.start_time for a,b in zip(ordered,ordered[1:])): raise HTTPException(422,"Existem horários de trabalho sobrepostos")
+    db.query(ProfessionalAvailability).filter(ProfessionalAvailability.professional_id==user.id).delete();user.default_session_duration_minutes=data.default_session_duration_minutes
+    for window in data.windows: db.add(ProfessionalAvailability(**window.model_dump(),professional_id=user.id,organization_id=user.organization_id))
+    audit(db,user,"update","availability");db.commit();return get_availability(user,db)
+@router.post("/visits/{visit_id}/confirmation-link",response_model=VisitConfirmationLink)
+def confirmation_link(visit_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
+    item=owned(db,Visit,visit_id,user);token=secrets.token_urlsafe(32);item.confirmation_token_hash=hashlib.sha256(token.encode()).hexdigest();db.commit()
+    return VisitConfirmationLink(url=f"{settings.frontend_url.rstrip('/')}/agendamento/{token}")
+@router.get("/public/visits/{token}",response_model=PublicVisitOut)
+def public_visit(token:str,db:Session=Depends(get_db)):
+    item=visit_by_token(db,token);professional_user=db.get(User,item.professional_id)
+    return PublicVisitOut(patient_name=item.patient.name,professional_name=professional_user.name,starts_at=item.starts_at,duration_minutes=item.duration_minutes,status=item.status,patient_response=item.patient_response)
+@router.get("/public/visits/{token}/available-slots",response_model=list[AvailableSlot])
+def public_slots(token:str,date_from:date|None=None,date_to:date|None=None,db:Session=Depends(get_db)):
+    item=visit_by_token(db,token);start=date_from or datetime.now(LOCAL_TZ).date();end=min(date_to or start+timedelta(days=14),start+timedelta(days=30));duration=db.get(User,item.professional_id).default_session_duration_minutes;result=[]
+    day=start
+    while day<=end:
+        for window in db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==item.professional_id,ProfessionalAvailability.weekday==day.weekday(),ProfessionalAvailability.is_active.is_(True))).all():
+            candidate=datetime.combine(day,window.start_time,tzinfo=LOCAL_TZ)
+            while candidate+timedelta(minutes=duration)<=datetime.combine(day,window.end_time,tzinfo=LOCAL_TZ):
+                if candidate>datetime.now(LOCAL_TZ) and slot_is_available(db,item,candidate,duration): result.append(AvailableSlot(starts_at=candidate,ends_at=candidate+timedelta(minutes=duration)))
+                candidate+=timedelta(minutes=duration)
+        day+=timedelta(days=1)
+    return result
+@router.post("/public/visits/{token}/response",response_model=PublicVisitOut)
+def public_visit_response(token:str,data:VisitResponseIn,db:Session=Depends(get_db)):
+    item=visit_by_token(db,token)
+    if item.status==VisitStatus.COMPLETED: raise HTTPException(409,"Este atendimento já foi concluído")
+    professional_user=db.get(User,item.professional_id);old=item.starts_at
+    if data.action=="confirm": item.patient_response="confirmed"
+    elif data.action=="cancel": item.status=VisitStatus.CANCELED;item.patient_response="canceled"
+    else:
+        if not data.new_starts_at: raise HTTPException(422,"Selecione um novo horário")
+        duration=professional_user.default_session_duration_minutes
+        if not slot_is_available(db,item,data.new_starts_at,duration): raise HTTPException(409,"Este horário não está mais disponível")
+        item.starts_at=data.new_starts_at;item.duration_minutes=duration;item.status=VisitStatus.SCHEDULED;item.patient_response="rescheduled"
+    item.patient_responded_at=datetime.now(timezone.utc);db.commit();db.refresh(item)
+    if data.action in {"cancel","reschedule"}:
+        fmt=lambda value:value.astimezone(LOCAL_TZ).strftime("%d/%m/%Y às %H:%M")
+        send_visit_change_email(professional_user.email,professional_user.name,item.patient.name,data.action,fmt(old),fmt(item.starts_at) if data.action=="reschedule" else None)
+    return PublicVisitOut(patient_name=item.patient.name,professional_name=professional_user.name,starts_at=item.starts_at,duration_minutes=item.duration_minutes,status=item.status,patient_response=item.patient_response)
 @router.post("/visits/{visit_id}/cancel",response_model=VisitOut)
 def cancel_visit(visit_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
     item=owned(db,Visit,visit_id,user)

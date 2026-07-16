@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -36,7 +36,7 @@ class EmailAction(BaseModel): email:EmailStr
 class PasswordReset(BaseModel): token:str; password:str=Field(min_length=8,max_length=128)
 class GoogleAuth(BaseModel):
     credential:str; organization_name:str|None=None; phone:str|None=None; cpf:str|None=None; profession:str|None=None; profession_other:str|None=None; council_name:str|None=None; council_code:str|None=None; council_state:str|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; accept_lgpd:bool=False
-class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None
+class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None; default_session_duration_minutes:int
 class ResponsibleCreate(BaseModel): name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class PatientIn(BaseModel): name:str; status:str="active"; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; care_needs:str|None=None; mobility:str|None=None; session_value:Decimal|None=Field(default=None,ge=0); session_count:int|None=Field(default=None,ge=1,le=365); notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
 class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
@@ -44,9 +44,16 @@ class PatientPortalInvite(BaseModel): name:str=Field(min_length=3,max_length=120
 class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
 class VisitIn(BaseModel): patient_id:str; starts_at:datetime; duration_minutes:int=60; notes:str|None=None
-class VisitOut(Out): id:str; patient_id:str; professional_id:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; notes:str|None; patient:PatientOut
-class RecordIn(BaseModel): patient_id:str; visit_id:str|None=None; occurred_at:datetime|None=None; summary:str; guidance:str|None=None; responsible_name:str|None=None; signature_data:str|None=None
-class RecordOut(Out): id:str; patient_id:str; visit_id:str|None; professional_id:str; occurred_at:datetime; summary:str; guidance:str|None; responsible_name:str|None; signature_data:str|None; patient:PatientOut
+class VisitOut(Out): id:str; patient_id:str; professional_id:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; notes:str|None; patient_response:str|None; patient:PatientOut
+class RecordIn(BaseModel): patient_id:str; visit_id:str|None=None; occurred_at:datetime|None=None; summary:str; guidance:str|None=None; weight_kg:Decimal|None=Field(default=None,gt=0,le=500); blood_pressure_systolic:int|None=Field(default=None,ge=40,le=300); blood_pressure_diastolic:int|None=Field(default=None,ge=20,le=200); heart_rate_bpm:int|None=Field(default=None,ge=20,le=300); respiratory_rate_bpm:int|None=Field(default=None,ge=4,le=100); temperature_c:Decimal|None=Field(default=None,ge=25,le=45); oxygen_saturation_percent:int|None=Field(default=None,ge=50,le=100); blood_glucose_mg_dl:int|None=Field(default=None,ge=20,le=1000); responsible_name:str|None=None; signature_data:str|None=None
+class RecordOut(RecordIn,Out): id:str; professional_id:str; occurred_at:datetime; patient:PatientOut
+class AvailabilityWindow(Out): weekday:int=Field(ge=0,le=6); start_time:time; end_time:time; is_active:bool=True
+class AvailabilitySettings(BaseModel): default_session_duration_minutes:int=Field(ge=15,le=480); windows:list[AvailabilityWindow]
+class AvailabilityOut(AvailabilitySettings): pass
+class VisitConfirmationLink(BaseModel): url:str
+class PublicVisitOut(BaseModel): patient_name:str; professional_name:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; patient_response:str|None
+class VisitResponseIn(BaseModel): action:Literal["confirm","cancel","reschedule"]; new_starts_at:datetime|None=None
+class AvailableSlot(BaseModel): starts_at:datetime; ends_at:datetime
 class FinanceIn(BaseModel): patient_id:str|None=None; entry_type:str="income"; description:str; amount:Decimal=Field(gt=0); due_date:date; paid:bool=False
 class FinanceOut(FinanceIn, Out): id:str; source:str|None=None; patient:PatientOut|None=None
 class Dashboard(BaseModel): patients:int; upcoming_visits:int; revenue_last_30_days:Decimal; receivable_next_30_days:Decimal

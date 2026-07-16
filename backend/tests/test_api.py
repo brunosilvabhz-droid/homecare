@@ -59,6 +59,20 @@ def test_tenant_flow(monkeypatch):
     assert client.get("/api/v1/patients",headers=headers).json()[0]["name"]=="Maria"
     with SessionLocal() as db: assert db.query(Responsible).filter(Responsible.name=="Carlos").count()==1
     visit=client.post("/api/v1/visits",json={"patient_id":patient.json()["id"],"starts_at":datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(),"duration_minutes":60},headers=headers)
+    target=(datetime.now(ZoneInfo("America/Sao_Paulo"))+timedelta(days=1)).replace(hour=10,minute=0,second=0,microsecond=0)
+    availability=client.put("/api/v1/availability",json={"default_session_duration_minutes":45,"windows":[{"weekday":target.weekday(),"start_time":"08:00","end_time":"18:00","is_active":True}]},headers=headers)
+    assert availability.status_code==200 and availability.json()["default_session_duration_minutes"]==45
+    confirmation=client.post(f"/api/v1/visits/{visit.json()['id']}/confirmation-link",headers=headers)
+    assert confirmation.status_code==200
+    confirmation_token=confirmation.json()["url"].rsplit("/",1)[-1]
+    assert client.post(f"/api/v1/public/visits/{confirmation_token}/response",json={"action":"confirm"}).json()["patient_response"]=="confirmed"
+    slots=client.get(f"/api/v1/public/visits/{confirmation_token}/available-slots",params={"date_from":target.date().isoformat(),"date_to":target.date().isoformat()})
+    assert slots.status_code==200 and slots.json()
+    monkeypatch.setattr("app.api.send_visit_change_email",lambda *args:True)
+    changed=client.post(f"/api/v1/public/visits/{confirmation_token}/response",json={"action":"reschedule","new_starts_at":slots.json()[0]["starts_at"]})
+    assert changed.status_code==200 and changed.json()["patient_response"]=="rescheduled" and changed.json()["duration_minutes"]==45
+    record=client.post("/api/v1/records",json={"patient_id":patient.json()["id"],"visit_id":visit.json()["id"],"summary":"Paciente estável.","weight_kg":"72.5","blood_pressure_systolic":120,"blood_pressure_diastolic":80,"heart_rate_bpm":72,"temperature_c":"36.5","oxygen_saturation_percent":98},headers=headers)
+    assert record.status_code==201 and record.json()["weight_kg"]=="72.50" and record.json()["oxygen_saturation_percent"]==98
     assert visit.status_code==201
     assert client.post(f"/api/v1/visits/{visit.json()['id']}/cancel",headers=headers).json()["status"]=="canceled"
     visit=client.post("/api/v1/visits",json={"patient_id":patient.json()["id"],"starts_at":datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(),"duration_minutes":60},headers=headers)
