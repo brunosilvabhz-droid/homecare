@@ -40,6 +40,7 @@ class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id
 class ResponsibleCreate(BaseModel): name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class PatientIn(BaseModel): name:str; status:str="active"; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; care_needs:str|None=None; mobility:str|None=None; session_value:Decimal|None=Field(default=None,ge=0); session_count:int|None=Field(default=None,ge=1,le=365); notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
 class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
+class PatientPortalInvite(BaseModel): name:str=Field(min_length=3,max_length=120); email:EmailStr
 class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
 class VisitIn(BaseModel): patient_id:str; starts_at:datetime; duration_minutes:int=60; notes:str|None=None

@@ -112,7 +112,9 @@ def forgot_password(data:EmailAction,db:Session=Depends(get_db)):
 def reset_password(data:PasswordReset,db:Session=Depends(get_db)):
     user_id=decode_password_reset_token(data.token); user=db.get(User,user_id) if user_id else None
     if not user: raise HTTPException(400,"Link inválido ou expirado")
-    user.password_hash=hash_password(data.password); db.commit()
+    user.password_hash=hash_password(data.password)
+    if user.email_verified_at is None: user.email_verified_at=datetime.now(timezone.utc)
+    db.commit()
     return Message(message="Senha redefinida com sucesso.")
 @router.get("/me",response_model=UserOut)
 def me(user:User=Depends(current_user)): return user
@@ -148,6 +150,19 @@ def update_patient(patient_id:str,data:PatientIn,user:User=Depends(professional)
             for key,value in data.responsible.model_dump().items(): setattr(responsible,key,value)
         else: db.add(Responsible(**data.responsible.model_dump(),patient_id=item.id,organization_id=user.organization_id))
     sync_patient_finance(db,item); audit(db,user,"update","patient"); db.commit(); db.refresh(item); return item
+@router.post("/patients/{patient_id}/portal-invite",response_model=Message)
+def invite_patient_portal(patient_id:str,data:PatientPortalInvite,user:User=Depends(professional),db:Session=Depends(get_db)):
+    patient=owned(db,Patient,patient_id,user); email=str(data.email).lower()
+    family=db.scalar(select(User).where(User.email==email))
+    if family and (family.organization_id!=user.organization_id or family.role!=Role.FAMILY): raise HTTPException(409,"Este e-mail já está vinculado a outra conta")
+    if not family:
+        family=User(organization_id=user.organization_id,name=data.name,email=email,password_hash=hash_password(secrets.token_urlsafe(48)),role=Role.FAMILY)
+        db.add(family); db.flush()
+    patient.family_user_id=family.id
+    responsible=db.scalar(select(Responsible).where(Responsible.patient_id==patient.id,Responsible.organization_id==user.organization_id,Responsible.email==email))
+    if responsible: responsible.portal_user_id=family.id
+    audit(db,user,"grant_portal_access","patient"); db.commit(); send_password_reset_email(family.id,family.email)
+    return Message(message="Convite enviado. O familiar definirá a senha pelo link recebido.")
 @router.get("/responsibles",response_model=list[ResponsibleOut])
 def responsibles(user:User=Depends(professional),db:Session=Depends(get_db)): return db.scalars(select(Responsible).where(Responsible.organization_id==user.organization_id).order_by(Responsible.name)).all()
 @router.post("/responsibles",response_model=ResponsibleOut,status_code=201)
