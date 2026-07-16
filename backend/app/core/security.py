@@ -18,6 +18,14 @@ def decode_email_token(token: str) -> str | None:
         payload=jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM])
         return payload.get("sub") if payload.get("purpose")=="verify_email" else None
     except JWTError: return None
+def create_password_reset_token(user_id: str) -> str:
+    exp = datetime.now(timezone.utc) + timedelta(hours=1)
+    return jwt.encode({"sub": user_id, "purpose": "password_reset", "exp": exp}, settings.jwt_secret, algorithm=ALGORITHM)
+def decode_password_reset_token(token: str) -> str | None:
+    try:
+        payload=jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM])
+        return payload.get("sub") if payload.get("purpose")=="password_reset" else None
+    except JWTError: return None
 def decode_token(token: str) -> str | None:
     try: return jwt.decode(token, settings.jwt_secret, algorithms=[ALGORITHM]).get("sub")
     except JWTError: return None

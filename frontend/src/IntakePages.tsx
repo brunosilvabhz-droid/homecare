@@ -4,7 +4,7 @@ import {useParams} from 'react-router-dom';
 import {ClipboardCheck,Copy,HeartHandshake,MessageCircle,Plus} from 'lucide-react';
 import {api,post} from './api';
 import {states} from './formOptions';
-type Intake={id:string;status:string;expires_at:string;submitted_at?:string;patient_id?:string;patient_name?:string};
+type Intake={id:string;status:string;expires_at:string;submitted_at?:string;patient_id?:string;patient_name?:string;recipient_name?:string;recipient_phone?:string};
 const val=(f:FormData,n:string)=>String(f.get(n)||'').trim()||null;
 const Field=({name,label,type='text',required=false}:{name:string;label:string;type?:string;required?:boolean})=><label><span className="label">{label}</span><input className="input" name={name} type={type} required={required}/></label>;
 const Text=({name,label}:{name:string;label:string})=><label className="block"><span className="label">{label}</span><textarea className="input min-h-24" name={name}/></label>;

@@ -8,8 +8,8 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.deps import current_user, professional, admin
-from app.core.security import hash_password, verify_password, create_token, decode_email_token
-from app.core.email import send_verification_email
+from app.core.security import hash_password, verify_password, create_token, decode_email_token, decode_password_reset_token
+from app.core.email import send_verification_email, send_password_reset_email
 from app.core.routing import geocode, calculate_route, money
 from app.core.config import settings
 from app.core.billing import create_asaas_checkout
@@ -21,6 +21,12 @@ def owned(db,model,id,user):
     item=db.scalar(select(model).where(model.id==id,model.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Recurso não encontrado")
     return item
+def sync_patient_finance(db:Session,patient:Patient):
+    db.query(FinanceEntry).filter(FinanceEntry.organization_id==patient.organization_id,FinanceEntry.patient_id==patient.id,FinanceEntry.source=="patient_sessions",FinanceEntry.paid.is_(False)).delete()
+    paid=db.scalar(select(func.count()).select_from(FinanceEntry).where(FinanceEntry.patient_id==patient.id,FinanceEntry.source=="patient_sessions",FinanceEntry.paid.is_(True))) or 0
+    if patient.session_value and patient.session_count:
+        for index in range(paid,patient.session_count):
+            db.add(FinanceEntry(organization_id=patient.organization_id,patient_id=patient.id,entry_type="income",source="patient_sessions",description=f"Sessão {index+1}/{patient.session_count} — {patient.name}",amount=patient.session_value,due_date=datetime.now(timezone.utc).date()+timedelta(days=index*7),paid=False))
 @router.post("/auth/register",response_model=Message,status_code=201)
 def register(data:Register,db:Session=Depends(get_db)):
     if not data.accept_lgpd: raise HTTPException(422,"É necessário aceitar o consentimento de privacidade")
@@ -53,16 +59,27 @@ def login(data:Login,db:Session=Depends(get_db)):
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"E-mail ou senha inválidos")
     if user.email_verified_at is None: raise HTTPException(403,"Confirme seu e-mail antes de entrar")
     return Token(access_token=create_token(user.id))
+@router.post("/auth/forgot-password",response_model=Message)
+def forgot_password(data:EmailAction,db:Session=Depends(get_db)):
+    user=db.scalar(select(User).where(User.email==str(data.email).lower()))
+    if user: send_password_reset_email(user.id,user.email)
+    return Message(message="Se o e-mail estiver cadastrado, enviaremos as instruções.")
+@router.post("/auth/reset-password",response_model=Message)
+def reset_password(data:PasswordReset,db:Session=Depends(get_db)):
+    user_id=decode_password_reset_token(data.token); user=db.get(User,user_id) if user_id else None
+    if not user: raise HTTPException(400,"Link inválido ou expirado")
+    user.password_hash=hash_password(data.password); db.commit()
+    return Message(message="Senha redefinida com sucesso.")
 @router.get("/me",response_model=UserOut)
 def me(user:User=Depends(current_user)): return user
 @router.get("/dashboard",response_model=Dashboard)
 def dashboard(user:User=Depends(professional),db:Session=Depends(get_db)):
-    org=user.organization_id; start=datetime.now(timezone.utc)
+    org=user.organization_id; start=datetime.now(timezone.utc); today=start.date(); past=today-timedelta(days=30); future=today+timedelta(days=30)
     patients=db.scalar(select(func.count()).select_from(Patient).where(Patient.organization_id==org,Patient.status=="active")) or 0
     upcoming=db.scalar(select(func.count()).select_from(Visit).where(Visit.organization_id==org,Visit.starts_at>=start,Visit.status==VisitStatus.SCHEDULED)) or 0
-    revenue=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.paid.is_(True))) or Decimal(0)
-    pending=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.paid.is_(False))) or Decimal(0)
-    return Dashboard(patients=patients,upcoming_visits=upcoming,monthly_revenue=revenue,pending_amount=pending)
+    revenue=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(True),FinanceEntry.due_date>=past,FinanceEntry.due_date<=today)) or Decimal(0)
+    pending=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(False),FinanceEntry.due_date>=today,FinanceEntry.due_date<=future)) or Decimal(0)
+    return Dashboard(patients=patients,upcoming_visits=upcoming,revenue_last_30_days=revenue,receivable_next_30_days=pending)
 @router.get("/patients",response_model=list[PatientOut])
 def patients(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(Patient).where(Patient.organization_id==user.organization_id)
@@ -73,7 +90,20 @@ def create_patient(data:PatientIn,user:User=Depends(professional),db:Session=Dep
     values=data.model_dump(exclude={"responsible"}); item=Patient(**values,organization_id=user.organization_id); db.add(item); db.flush()
     if data.responsible:
         db.add(Responsible(**data.responsible.model_dump(),patient_id=item.id,organization_id=user.organization_id))
+    sync_patient_finance(db,item)
     audit(db,user,"create","patient"); db.commit(); db.refresh(item); return item
+@router.get("/patients/{patient_id}",response_model=PatientOut)
+def get_patient(patient_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)): return owned(db,Patient,patient_id,user)
+@router.patch("/patients/{patient_id}",response_model=PatientOut)
+def update_patient(patient_id:str,data:PatientIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+    item=owned(db,Patient,patient_id,user)
+    for key,value in data.model_dump(exclude={"responsible"}).items(): setattr(item,key,value)
+    if data.responsible:
+        responsible=db.scalar(select(Responsible).where(Responsible.patient_id==item.id,Responsible.organization_id==user.organization_id))
+        if responsible:
+            for key,value in data.responsible.model_dump().items(): setattr(responsible,key,value)
+        else: db.add(Responsible(**data.responsible.model_dump(),patient_id=item.id,organization_id=user.organization_id))
+    sync_patient_finance(db,item); audit(db,user,"update","patient"); db.commit(); db.refresh(item); return item
 @router.get("/responsibles",response_model=list[ResponsibleOut])
 def responsibles(user:User=Depends(professional),db:Session=Depends(get_db)): return db.scalars(select(Responsible).where(Responsible.organization_id==user.organization_id).order_by(Responsible.name)).all()
 @router.post("/responsibles",response_model=ResponsibleOut,status_code=201)
@@ -87,6 +117,11 @@ def visits(user:User=Depends(current_user),db:Session=Depends(get_db)):
 @router.post("/visits",response_model=VisitOut,status_code=201)
 def create_visit(data:VisitIn,user:User=Depends(professional),db:Session=Depends(get_db)):
     owned(db,Patient,data.patient_id,user); item=Visit(**data.model_dump(),professional_id=user.id,organization_id=user.organization_id); db.add(item); audit(db,user,"create","visit"); db.commit(); db.refresh(item); return item
+@router.post("/visits/{visit_id}/cancel",response_model=VisitOut)
+def cancel_visit(visit_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
+    item=owned(db,Visit,visit_id,user)
+    if item.status==VisitStatus.COMPLETED: raise HTTPException(409,"Atendimento concluído não pode ser cancelado")
+    item.status=VisitStatus.CANCELED; audit(db,user,"cancel","visit"); db.commit(); db.refresh(item); return item
 @router.get("/records",response_model=list[RecordOut])
 def records(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(ServiceRecord).join(Patient).where(ServiceRecord.organization_id==user.organization_id)
@@ -110,7 +145,10 @@ def create_vehicle(data:VehicleIn,user:User=Depends(professional),db:Session=Dep
     item=Vehicle(**data.model_dump(),organization_id=user.organization_id); db.add(item); audit(db,user,"create","vehicle"); db.commit(); db.refresh(item); return item
 @router.post("/routes/calculate")
 def route_calculate(data:RouteCalculate,user:User=Depends(professional),db:Session=Depends(get_db)):
-    vehicle=owned(db,Vehicle,data.vehicle_id,user)
+    vehicle=owned(db,Vehicle,data.vehicle_id,user) if data.vehicle_id else None
+    average=Decimal(vehicle.average_km_per_liter) if vehicle else Decimal(data.average_km_per_liter)
+    fuel_price=Decimal(vehicle.fuel_price) if vehicle else Decimal(data.fuel_price)
+    additional=Decimal(vehicle.additional_cost_per_km) if vehicle else Decimal(data.additional_cost_per_km)
     local_tz=ZoneInfo("America/Sao_Paulo"); start=datetime.combine(data.date,time.min,tzinfo=local_tz).astimezone(timezone.utc); end=datetime.combine(data.date,time.max,tzinfo=local_tz).astimezone(timezone.utc)
     visits=db.scalars(select(Visit).join(Patient).where(Visit.organization_id==user.organization_id,Visit.starts_at>=start,Visit.starts_at<=end,Visit.status==VisitStatus.SCHEDULED).order_by(Visit.starts_at)).all()
     if not visits: raise HTTPException(422,"Não há visitas agendadas para esta data")
@@ -124,15 +162,15 @@ def route_calculate(data:RouteCalculate,user:User=Depends(professional),db:Sessi
         points.append((patient.latitude,patient.longitude)); stops.append({"input_index":len(points)-1,"visit_id":visit.id,"patient_id":patient.id,"patient_name":patient.name,"scheduled_at":visit.starts_at,"duration_minutes":visit.duration_minutes,"address":", ".join(filter(None,[patient.address,patient.address_number,patient.city,patient.state]))})
     route_points=points if data.optimize_order or not data.return_to_start else points+[start_point]
     calculated=calculate_route(route_points,data.return_to_start,data.optimize_order); route=calculated["route"]; order=calculated["order"]
-    rate=Decimal(vehicle.fuel_price)/Decimal(vehicle.average_km_per_liter)+Decimal(vehicle.additional_cost_per_km); ordered_stops=[]; return_cost=Decimal(0)
+    rate=fuel_price/average+additional; ordered_stops=[]; return_cost=Decimal(0)
     stop_by_index={stop["input_index"]:stop for stop in stops}
     for leg_index,leg in enumerate(route["legs"]):
         destination=order[(leg_index+1)%len(order)] if data.optimize_order else leg_index+1
         cost=money(Decimal(str(leg["distance"]))/Decimal(1000)*rate)
         if destination in stop_by_index: ordered_stops.append({**stop_by_index[destination],"leg_distance_km":round(leg["distance"]/1000,2),"leg_duration_minutes":round(leg["duration"]/60),"leg_cost":cost})
         else: return_cost+=cost
-    total_km=Decimal(str(route["distance"]))/Decimal(1000); fuel_liters=total_km/Decimal(vehicle.average_km_per_liter); db.commit()
-    return {"date":data.date,"vehicle":{"id":vehicle.id,"name":vehicle.name},"total_distance_km":round(float(total_km),2),"total_duration_minutes":round(route["duration"]/60),"estimated_fuel_liters":float(fuel_liters.quantize(Decimal("0.01"))),"fuel_cost":money(fuel_liters*Decimal(vehicle.fuel_price)),"additional_cost":money(total_km*Decimal(vehicle.additional_cost_per_km)),"total_cost":money(total_km*rate),"return_cost":money(return_cost),"stops":ordered_stops,"geometry":route["geometry"]}
+    total_km=Decimal(str(route["distance"]))/Decimal(1000); fuel_liters=total_km/average; db.commit()
+    return {"date":data.date,"total_distance_km":round(float(total_km),2),"total_duration_minutes":round(route["duration"]/60),"estimated_fuel_liters":float(fuel_liters.quantize(Decimal("0.01"))),"fuel_cost":money(fuel_liters*fuel_price),"additional_cost":money(total_km*additional),"total_cost":money(total_km*rate),"return_cost":money(return_cost),"stops":ordered_stops,"geometry":route["geometry"]}
 def intake_by_token(db:Session,token:str):
     item=db.scalar(select(IntakeRequest).where(IntakeRequest.token_hash==hashlib.sha256(token.encode()).hexdigest()))
     expires=item.expires_at.replace(tzinfo=timezone.utc) if item and item.expires_at.tzinfo is None else item.expires_at if item else None
@@ -140,12 +178,12 @@ def intake_by_token(db:Session,token:str):
     return item
 @router.post("/intakes",status_code=201)
 def create_intake_link(data:IntakeLinkCreate,user:User=Depends(professional),db:Session=Depends(get_db)):
-    token=secrets.token_urlsafe(32); item=IntakeRequest(organization_id=user.organization_id,created_by_id=user.id,token_hash=hashlib.sha256(token.encode()).hexdigest(),expires_at=datetime.now(timezone.utc)+timedelta(days=data.expires_in_days));db.add(item);audit(db,user,"create","intake_link");db.commit();db.refresh(item)
+    token=secrets.token_urlsafe(32); item=IntakeRequest(organization_id=user.organization_id,created_by_id=user.id,recipient_name=data.recipient_name,recipient_phone=data.recipient_phone,token_hash=hashlib.sha256(token.encode()).hexdigest(),expires_at=datetime.now(timezone.utc)+timedelta(days=data.expires_in_days));db.add(item);audit(db,user,"create","intake_link");db.commit();db.refresh(item)
     return {"id":item.id,"status":item.status,"expires_at":item.expires_at,"url":f"{settings.frontend_url.rstrip('/')}/avaliacao/{token}"}
 @router.get("/intakes")
 def list_intakes(user:User=Depends(professional),db:Session=Depends(get_db)):
     items=db.scalars(select(IntakeRequest).where(IntakeRequest.organization_id==user.organization_id).order_by(IntakeRequest.created_at.desc())).all()
-    return [{"id":x.id,"status":x.status,"expires_at":x.expires_at,"submitted_at":x.submitted_at,"patient_id":x.patient_id,"patient_name":(x.family_data or {}).get("patient_name")} for x in items]
+    return [{"id":x.id,"status":x.status,"expires_at":x.expires_at,"submitted_at":x.submitted_at,"patient_id":x.patient_id,"patient_name":(x.family_data or {}).get("patient_name"),"recipient_name":x.recipient_name,"recipient_phone":x.recipient_phone} for x in items]
 @router.get("/public/intakes/{token}")
 def public_intake(token:str,db:Session=Depends(get_db)):
     item=intake_by_token(db,token); creator=db.get(User,item.created_by_id)
@@ -156,7 +194,7 @@ def submit_intake(token:str,data:IntakeSubmit,db:Session=Depends(get_db)):
     if item.status!="pending": raise HTTPException(409,"Este formulário já foi enviado")
     if not data.accept_privacy: raise HTTPException(422,"É necessário aceitar o aviso de privacidade")
     values=data.model_dump(mode="json"); notes="\n\n".join(f"{label}: {values.get(field)}" for label,field in [("Condições informadas","conditions"),("Medicamentos","medications"),("Alergias","allergies"),("Necessidades","needs"),("Mobilidade","mobility"),("Informações adicionais","additional_information")] if values.get(field))
-    patient=Patient(organization_id=item.organization_id,status="inactive",name=data.patient_name,birth_date=data.birth_date,cpf=data.cpf,gender=data.gender,phone=data.phone,email=str(data.email) if data.email else None,postal_code=data.postal_code,address=data.address,address_number=data.address_number,address_complement=data.address_complement,neighborhood=data.neighborhood,city=data.city,state=data.state,notes=notes or None);db.add(patient);db.flush()
+    patient=Patient(organization_id=item.organization_id,status="inactive",name=data.patient_name,birth_date=data.birth_date,cpf=data.cpf,gender=data.gender,phone=data.phone,email=str(data.email) if data.email else None,postal_code=data.postal_code,address=data.address,address_number=data.address_number,address_complement=data.address_complement,neighborhood=data.neighborhood,city=data.city,state=data.state,conditions=data.conditions,medications=data.medications,allergies=data.allergies,care_needs=data.needs,mobility=data.mobility,notes=data.additional_information or notes or None);db.add(patient);db.flush()
     db.add(Responsible(organization_id=item.organization_id,patient_id=patient.id,name=data.responsible_name,relationship=data.responsible_relationship,phone=data.responsible_phone,email=str(data.responsible_email) if data.responsible_email else None));item.status="submitted";item.submitted_at=datetime.now(timezone.utc);item.patient_id=patient.id;item.family_data=values;db.commit()
     return {"message":"Informações enviadas ao profissional com sucesso.","patient_id":patient.id}
 @router.post("/patients/{patient_id}/activate")
