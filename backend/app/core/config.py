@@ -15,7 +15,9 @@ class Settings(BaseSettings):
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_from_email: str = "nao-responda@impactocg.com"
+    support_email: str = "contato@impactocg.com"
     smtp_use_tls: bool = True
+    google_client_id: str | None = None
     geocoder_url: str = "https://nominatim.openstreetmap.org"
     routing_url: str = "https://router.project-osrm.org"
     map_user_agent: str = "ImpactoCare/0.1 contato@impactocg.com"

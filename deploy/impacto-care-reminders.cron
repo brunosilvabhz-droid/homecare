@@ -1,0 +1,2 @@
+# Executar diariamente às 08:00 no horário configurado na VPS.
+0 8 * * * cd /opt/impacto-care && /usr/bin/docker compose -f docker-compose.yml -f docker-compose.kinghost.yml exec -T api python -m app.subscription_reminders >> /var/log/impacto-care-reminders.log 2>&1

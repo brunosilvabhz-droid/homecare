@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 from app.models import Role, VisitStatus, BillingCycle
 class Out(BaseModel): model_config=ConfigDict(from_attributes=True)
@@ -29,8 +30,12 @@ class Register(BaseModel):
 class Login(BaseModel): email:EmailStr; password:str
 class Token(BaseModel): access_token:str; token_type:str="bearer"
 class Message(BaseModel): message:str
+class SupportTicketIn(BaseModel): category:Literal["error","question","suggestion","request"]; description:str=Field(min_length=10,max_length=5000)
+class SupportTicketOut(Out): id:str; ticket_number:str; category:str; description:str; status:str; email_sent_at:datetime|None; created_at:datetime
 class EmailAction(BaseModel): email:EmailStr
 class PasswordReset(BaseModel): token:str; password:str=Field(min_length=8,max_length=128)
+class GoogleAuth(BaseModel):
+    credential:str; organization_name:str|None=None; phone:str|None=None; cpf:str|None=None; profession:str|None=None; profession_other:str|None=None; council_name:str|None=None; council_code:str|None=None; council_state:str|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; accept_lgpd:bool=False
 class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None
 class ResponsibleCreate(BaseModel): name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class PatientIn(BaseModel): name:str; status:str="active"; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; care_needs:str|None=None; mobility:str|None=None; session_value:Decimal|None=Field(default=None,ge=0); session_count:int|None=Field(default=None,ge=1,le=365); notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
@@ -56,4 +61,6 @@ class RouteCalculate(BaseModel):
 class IntakeLinkCreate(BaseModel): expires_in_days:int=Field(default=7,ge=1,le=30); recipient_name:str|None=Field(default=None,min_length=2,max_length=120); recipient_phone:str|None=Field(default=None,min_length=8,max_length=30)
 class IntakeSubmit(BaseModel):
     patient_name:str=Field(min_length=3,max_length=120); birth_date:date|None=None; cpf:str|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; needs:str|None=None; mobility:str|None=None; additional_information:str|None=None; responsible_name:str=Field(min_length=3,max_length=120); responsible_relationship:str; responsible_phone:str; responsible_email:EmailStr|None=None; accept_privacy:bool
-class CheckoutCreate(BaseModel): billing_cycle:BillingCycle
+class CheckoutCreate(BaseModel):
+    billing_cycle:BillingCycle
+    payment_method:Literal["credit_card","pix"]="credit_card"

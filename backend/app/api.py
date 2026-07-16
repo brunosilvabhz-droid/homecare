@@ -1,19 +1,23 @@
 from datetime import datetime, timezone, time, timedelta
 import hashlib, secrets
 import json
+import logging
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.deps import current_user, professional, admin
+from app.deps import current_user, professional, account_professional, admin
 from app.core.security import hash_password, verify_password, create_token, decode_email_token, decode_password_reset_token
-from app.core.email import send_verification_email, send_password_reset_email
+from app.core.email import send_verification_email, send_password_reset_email, send_support_ticket_email
 from app.core.routing import geocode, calculate_route, money
 from app.core.config import settings
 from app.core.billing import create_asaas_checkout
-from app.models import Organization, User, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent
+from app.core.subscriptions import subscription_access
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent
 from app.schemas import *
 router=APIRouter()
 def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organization_id,user_id=user.id,action=action,resource=resource))
@@ -59,6 +63,46 @@ def login(data:Login,db:Session=Depends(get_db)):
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"E-mail ou senha inválidos")
     if user.email_verified_at is None: raise HTTPException(403,"Confirme seu e-mail antes de entrar")
     return Token(access_token=create_token(user.id))
+@router.post("/auth/google",response_model=Token)
+def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
+    if not settings.google_client_id:
+        raise HTTPException(503,"Login com Google ainda não está configurado")
+    try:
+        identity=google_id_token.verify_oauth2_token(data.credential,google_requests.Request(),settings.google_client_id)
+    except Exception:
+        raise HTTPException(401,"Credencial do Google inválida")
+    if not identity.get("email_verified"):
+        raise HTTPException(401,"O Google não confirmou este e-mail")
+    subject=str(identity["sub"]); email=str(identity["email"]).lower()
+    google_identity=db.scalar(select(GoogleIdentity).where(GoogleIdentity.subject==subject))
+    user=db.get(User,google_identity.user_id) if google_identity else None
+    if not user:
+        user=db.scalar(select(User).where(User.email==email))
+        if user:
+            linked=db.scalar(select(GoogleIdentity).where(GoogleIdentity.user_id==user.id))
+            if linked and linked.subject!=subject: raise HTTPException(409,"Esta conta já está vinculada a outro acesso Google")
+            if not linked: db.add(GoogleIdentity(user_id=user.id,subject=subject))
+            if user.email_verified_at is None: user.email_verified_at=datetime.now(timezone.utc)
+        else:
+            required=(data.organization_name,data.phone,data.cpf,data.profession,data.city,data.state)
+            if not data.accept_lgpd or any(not value for value in required):
+                raise HTTPException(422,"Preencha os dados profissionais e aceite o aviso de privacidade para criar a conta")
+            if data.profession not in PROFESSIONS:
+                raise HTTPException(422,"Profissão inválida")
+            org=Organization(name=data.organization_name); db.add(org); db.flush()
+            profile=data.model_dump(exclude={"credential","organization_name","accept_lgpd"})
+            profile["state"]=str(data.state).upper()
+            if profile.get("council_state"): profile["council_state"]=str(profile["council_state"]).upper()
+            user=User(**profile,name=str(identity.get("name") or email.split("@")[0]),email=email,password_hash=hash_password(secrets.token_urlsafe(48)),email_verified_at=datetime.now(timezone.utc),role=Role.PROFESSIONAL,organization_id=org.id)
+            db.add(user); db.flush(); db.add(GoogleIdentity(user_id=user.id,subject=subject))
+            plan=db.scalar(select(Plan).where(Plan.code=="pro"))
+            if not plan:
+                plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
+            db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=30)).date()))
+    if not user.is_active: raise HTTPException(403,"Conta desativada")
+    db.commit()
+    return Token(access_token=create_token(user.id))
+
 @router.post("/auth/forgot-password",response_model=Message)
 def forgot_password(data:EmailAction,db:Session=Depends(get_db)):
     user=db.scalar(select(User).where(User.email==str(data.email).lower()))
@@ -206,18 +250,19 @@ def report_summary(user:User=Depends(professional),db:Session=Depends(get_db)):
     by_status=db.execute(select(Visit.status,func.count()).where(Visit.organization_id==org).group_by(Visit.status)).all()
     return {"generated_at":datetime.now(timezone.utc),"visits_by_status":{str(k.value):v for k,v in by_status},"service_records":db.scalar(select(func.count()).select_from(ServiceRecord).where(ServiceRecord.organization_id==org)) or 0,"total_received":db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.paid.is_(True))) or 0}
 @router.get("/billing/subscription")
-def subscription(user:User=Depends(professional),db:Session=Depends(get_db)):
+def subscription(user:User=Depends(account_professional),db:Session=Depends(get_db)):
     item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Assinatura não encontrada")
     plan=db.get(Plan,item.plan_id)
-    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price},"gateway":item.gateway}
+    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price},"gateway":item.gateway,**subscription_access(item)}
 @router.post("/billing/checkout")
-def billing_checkout(data:CheckoutCreate,user:User=Depends(professional),db:Session=Depends(get_db)):
+def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional),db:Session=Depends(get_db)):
     item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id)); plan=db.get(Plan,item.plan_id) if item else None
     if not item or not plan: raise HTTPException(404,"Assinatura não encontrada")
     first_due=item.current_period_end if item.status==SubscriptionStatus.TRIAL and item.current_period_end and item.current_period_end>datetime.now(timezone.utc).date() else datetime.now(timezone.utc).date()
     annual=data.billing_cycle==BillingCycle.ANNUAL; value=Decimal(plan.annual_monthly_price)*12 if annual else Decimal(plan.monthly_price); cycle="YEARLY" if annual else "MONTHLY"
-    payload={"billingTypes":["CREDIT_CARD"],"chargeTypes":["RECURRENT"],"minutesToExpire":60,"externalReference":item.id,"callback":{"successUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=success","cancelUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=cancel","expiredUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=expired"},"items":[{"name":f"Impacto Care - {'Anual' if annual else 'Mensal'}","description":"Plataforma de gestão para profissionais de atendimento domiciliar","quantity":1,"value":float(value)}],"subscription":{"cycle":cycle,"nextDueDate":first_due.isoformat()}}
+    billing_type="PIX" if data.payment_method=="pix" else "CREDIT_CARD"
+    payload={"billingTypes":[billing_type],"chargeTypes":["RECURRENT"],"minutesToExpire":60,"externalReference":item.id,"callback":{"successUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=success","cancelUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=cancel","expiredUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=expired"},"items":[{"name":f"Impacto Care - {'Anual' if annual else 'Mensal'}","description":"Plataforma de gestão para profissionais de atendimento domiciliar","quantity":1,"value":float(value)}],"subscription":{"cycle":cycle,"nextDueDate":first_due.isoformat()}}
     checkout=create_asaas_checkout(payload); checkout_id=checkout.get("id")
     if not checkout_id: raise HTTPException(502,"Resposta inválida do ASAAS")
     item.gateway="asaas";item.external_id=checkout_id;item.billing_cycle=data.billing_cycle;db.commit()
@@ -236,6 +281,25 @@ def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-acc
         elif event_type in {"PAYMENT_REFUNDED","PAYMENT_DELETED"}: item.status=SubscriptionStatus.CANCELED
         if payment.get("subscription"): item.external_id=payment["subscription"]
     db.commit();return {"received":True}
+@router.get("/support/tickets",response_model=list[SupportTicketOut])
+def support_tickets(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    return db.scalars(select(SupportTicket).where(SupportTicket.organization_id==user.organization_id,SupportTicket.user_id==user.id).order_by(SupportTicket.created_at.desc())).all()
+
+@router.post("/support/tickets",response_model=SupportTicketOut,status_code=201)
+def create_support_ticket(data:SupportTicketIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    while True:
+        number=f"ICP-{datetime.now(timezone.utc):%Y%m%d}-{secrets.token_hex(3).upper()}"
+        if not db.scalar(select(SupportTicket).where(SupportTicket.ticket_number==number)): break
+    item=SupportTicket(ticket_number=number,organization_id=user.organization_id,user_id=user.id,category=data.category,description=data.description.strip())
+    db.add(item); audit(db,user,"create","support_ticket"); db.commit(); db.refresh(item)
+    organization=db.get(Organization,user.organization_id)
+    try:
+        if send_support_ticket_email(item.ticket_number,item.category,item.description,user.name,user.email,organization.name if organization else user.organization_id):
+            item.email_sent_at=datetime.now(timezone.utc); db.commit(); db.refresh(item)
+    except (OSError,TimeoutError) as error:
+        logging.getLogger(__name__).exception("Falha ao enviar chamado %s por e-mail",item.ticket_number,exc_info=error)
+    return item
+
 @router.get("/admin/overview")
 def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
     return {"organizations":db.scalar(select(func.count()).select_from(Organization)),"users":db.scalar(select(func.count()).select_from(User)),"patients":db.scalar(select(func.count()).select_from(Patient))}

@@ -1,4 +1,4 @@
-import {FormEvent,useEffect,useState} from 'react';
+import {FormEvent,useEffect,useRef,useState} from 'react';
 import {HeartHandshake} from 'lucide-react';
 import {useNavigate,useSearchParams} from 'react-router-dom';
 import {api,post} from './api';
@@ -6,17 +6,27 @@ import {professionCouncil,professions,states} from './formOptions';
 
 const value=(form:FormData,name:string)=>String(form.get(name)||'').trim()||null;
 const Input=({name,label,type='text',required=false,minLength}:{name:string;label:string;type?:string;required?:boolean;minLength?:number})=><label className="block"><span className="label">{label}</span><input className="input" name={name} type={type} required={required} minLength={minLength}/></label>;
+type GoogleCredential={credential:string};
+declare global{interface Window{google?:{accounts:{id:{initialize:(options:{client_id:string;callback:(response:GoogleCredential)=>void})=>void;renderButton:(element:HTMLElement,options:Record<string,unknown>)=>void}}}}}
+function GoogleButton({onCredential}:{onCredential:(credential:string)=>void}){
+  const target=useRef<HTMLDivElement>(null);const clientId=import.meta.env.VITE_GOOGLE_CLIENT_ID;
+  useEffect(()=>{if(!clientId||!target.current)return;const render=()=>{if(!window.google||!target.current)return;window.google.accounts.id.initialize({client_id:clientId,callback:r=>onCredential(r.credential)});target.current.innerHTML='';window.google.accounts.id.renderButton(target.current,{theme:'outline',size:'large',width:360,text:'continue_with',locale:'pt-BR'})};const existing=document.querySelector<HTMLScriptElement>('script[data-google-identity]');if(existing){if(window.google)render();else existing.addEventListener('load',render,{once:true});return}const script=document.createElement('script');script.src='https://accounts.google.com/gsi/client';script.async=true;script.dataset.googleIdentity='true';script.onload=render;document.head.appendChild(script)},[clientId,onCredential]);
+  if(!clientId)return null;return <><div className="my-5 flex items-center gap-3 text-xs text-ink/40"><span className="h-px flex-1 bg-ink/10"/>ou<span className="h-px flex-1 bg-ink/10"/></div><div ref={target} className="flex justify-center"/></>;
+}
+function professionalData(form:FormData){return {organization_name:value(form,'organization_name'),phone:value(form,'phone'),cpf:value(form,'cpf'),profession:value(form,'profession'),profession_other:value(form,'profession_other'),council_name:value(form,'council_name'),council_code:value(form,'council_code'),council_state:value(form,'council_state'),postal_code:value(form,'postal_code'),address:value(form,'address'),address_number:value(form,'address_number'),address_complement:value(form,'address_complement'),neighborhood:value(form,'neighborhood'),city:value(form,'city'),state:value(form,'state'),accept_lgpd:form.get('lgpd')==='on'}}
 
 export function AccountAuth({mode}:{mode:'login'|'register'}){
   const nav=useNavigate(); const [error,setError]=useState(''); const [success,setSuccess]=useState(''); const [profession,setProfession]=useState('');
+  const enter=({access_token}:{access_token:string})=>{localStorage.setItem('token',access_token);nav('/app')};
+  const google=async(credential:string)=>{setError('');try{const form=document.querySelector<HTMLFormElement>('form');const profile=mode==='register'&&form?professionalData(new FormData(form)):{};enter(await post<{access_token:string}>('/auth/google',{credential,...profile}))}catch(reason){setError((reason as Error).message)}};
   const submit=async(e:FormEvent<HTMLFormElement>)=>{
     e.preventDefault(); setError(''); const form=new FormData(e.currentTarget);
     try{
       if(mode==='login'){
         const result=await post<{access_token:string}>('/auth/login',{email:value(form,'email'),password:value(form,'password')});
-        localStorage.setItem('token',result.access_token); nav('/app'); return;
+        enter(result); return;
       }
-      const data={name:value(form,'name'),organization_name:value(form,'organization_name'),email:value(form,'email'),password:value(form,'password'),phone:value(form,'phone'),cpf:value(form,'cpf'),profession:value(form,'profession'),profession_other:value(form,'profession_other'),council_name:value(form,'council_name'),council_code:value(form,'council_code'),council_state:value(form,'council_state'),postal_code:value(form,'postal_code'),address:value(form,'address'),address_number:value(form,'address_number'),address_complement:value(form,'address_complement'),neighborhood:value(form,'neighborhood'),city:value(form,'city'),state:value(form,'state'),accept_lgpd:form.get('lgpd')==='on'};
+      const data={name:value(form,'name'),email:value(form,'email'),password:value(form,'password'),...professionalData(form)};
       const result=await post<{message:string}>('/auth/register',data); setSuccess(result.message);
     }catch(reason){setError((reason as Error).message)}
   };
@@ -28,9 +38,9 @@ export function AccountAuth({mode}:{mode:'login'|'register'}){
       {profession==='other'&&<Input name="profession_other" label="Informe sua profissão" required/>}
       <label className="block"><span className="label">Conselho profissional</span><input className="input bg-ink/5" name="council_name" value={professionCouncil[profession]||''} placeholder="Não se aplica" readOnly/></label><Input name="council_code" label="Número do conselho (opcional)"/><StateSelect name="council_state" label="UF do conselho (opcional)" optional/>
       <Input name="postal_code" label="CEP (opcional)"/><Input name="address" label="Logradouro (opcional)"/><Input name="address_number" label="Número (opcional)"/><Input name="address_complement" label="Complemento (opcional)"/><Input name="neighborhood" label="Bairro (opcional)"/><Input name="city" label="Cidade" required/><StateSelect name="state" label="Estado (UF)"/>
-      <label className="md:col-span-2 flex gap-2 text-xs text-ink/60"><input name="lgpd" type="checkbox" required/>Li e aceito os termos e o aviso de privacidade.</label>
+      <label className="md:col-span-2 flex items-start gap-2 text-xs text-ink/60"><input className="mt-0.5" name="lgpd" type="checkbox" required/><span>Li e aceito os <a className="font-semibold text-brand underline" href="/termos" target="_blank" rel="noreferrer">Termos de Uso</a> e o <a className="font-semibold text-brand underline" href="/privacidade" target="_blank" rel="noreferrer">Aviso de Privacidade</a>.</span></label>
     </div>}
-    {error&&<p className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}<button className="btn-primary mt-6 w-full">{mode==='login'?'Entrar':'Criar conta e validar e-mail'}</button><p className="mt-5 text-center text-sm">{mode==='login'?'Ainda não tem conta? ':'Já tem uma conta? '}<a className="font-bold text-brand" href={mode==='login'?'/cadastro':'/login'}>{mode==='login'?'Começar agora':'Entrar'}</a></p></form></Page>;
+    {error&&<p className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}<button className="btn-primary mt-6 w-full">{mode==='login'?'Entrar':'Criar conta e validar e-mail'}</button><GoogleButton onCredential={google}/><p className="mt-5 text-center text-sm">{mode==='login'?'Ainda não tem conta? ':'Já tem uma conta? '}<a className="font-bold text-brand" href={mode==='login'?'/cadastro':'/login'}>{mode==='login'?'Começar agora':'Entrar'}</a></p></form></Page>;
 }
 
 export function ConfirmEmail(){

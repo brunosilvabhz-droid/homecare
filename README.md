@@ -23,6 +23,19 @@ Para criar o primeiro administrador:
 docker compose exec -e ADMIN_EMAIL=admin@exemplo.com -e ADMIN_PASSWORD='uma-senha-forte' api python -m app.seed
 ```
 
+## Login com Google
+
+Crie no Google Cloud um cliente OAuth 2.0 do tipo **Aplicativo da Web** e configure as origens JavaScript autorizadas (`http://localhost:5173` no ambiente local e `https://care.impactocg.com` em produção). Não são solicitados acessos a Gmail, Drive, contatos ou agenda.
+
+Use o mesmo Client ID nas duas variáveis do `.env`:
+
+```env
+GOOGLE_CLIENT_ID=seu-client-id.apps.googleusercontent.com
+VITE_GOOGLE_CLIENT_ID=seu-client-id.apps.googleusercontent.com
+```
+
+O backend valida a assinatura, emissor, audiência e validade da credencial. O frontend nunca recebe o segredo do cliente. Depois de alterar o Client ID, reconstrua as imagens `api` e `web`, pois a variável `VITE_GOOGLE_CLIENT_ID` é incorporada durante o build do frontend.
+
 ## Implantação econômica em VPS
 
 Uma VPS Linux com 2 vCPU e 4 GB atende o início. Instale Docker e o plugin Compose, aponte o DNS e coloque Caddy ou Nginx no host para TLS automático. Mantenha apenas as portas 80/443 públicas; banco e API permanecem na rede Docker. Provedores nacionais ou com cobrança em reais podem ser comparados no momento da contratação.
@@ -56,6 +69,10 @@ frontend/src/      landing, autenticação e módulos do painel
 4. Publicidade, somente após escala e consentimento adequado.
 
 O catálogo, publicidade e cobrança automática não fazem parte deste MVP.
+
+## Lembretes de expiração
+
+Instale no `crontab` da VPS a linha disponível em `deploy/impacto-care-reminders.cron`. A rotina diária é idempotente e envia avisos 7 dias antes, 1 dia antes, no término e no bloqueio, deixando claro que a mensagem é um lembrete de expiração e não uma cobrança.
 
 
 ## Sentinela na mesma VPS

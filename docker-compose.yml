@@ -23,6 +23,7 @@ services:
       context: ./frontend
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
     ports: ["${WEB_BIND:-0.0.0.0}:${WEB_PORT:-5173}:80"]
     depends_on: [api]
 volumes:

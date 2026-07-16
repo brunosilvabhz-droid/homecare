@@ -100,13 +100,14 @@ Configure 2 GB de swap e acompanhe `docker stats`, `free -h`, `df -h` e `uptime`
 ## 8. Atualizações
 
 ```bash
-cd /opt/sentinela
-git pull
-docker compose up -d --build
-
 cd /opt/impacto-care
-git pull
-docker compose up -d --build
+chmod +x deploy/deploy-kinghost.sh
+sudo ./deploy/deploy-kinghost.sh
 ```
 
-Faça backup antes de atualizações que incluam migrações de banco.
+O script cria um backup, executa `git pull --ff-only`, aplica as migrações durante a inicialização da API, reconstrói os serviços e valida API e frontend. Para instalar o lembrete diário:
+
+```bash
+sudo cp deploy/impacto-care-reminders.cron /etc/cron.d/impacto-care-reminders
+sudo chmod 644 /etc/cron.d/impacto-care-reminders
+```
