@@ -66,6 +66,7 @@ def login(data:Login,request:Request,db:Session=Depends(get_db)):
     user=db.scalar(select(User).where(User.email==data.email.lower()))
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"E-mail ou senha inválidos")
     if user.email_verified_at is None: raise HTTPException(403,"Confirme seu e-mail antes de entrar")
+    user.last_login_at=datetime.now(timezone.utc); db.commit()
     return Token(access_token=create_token(user.id))
 @router.post("/auth/google",response_model=Token)
 def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
@@ -104,6 +105,7 @@ def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
                 plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
             db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=30)).date()))
     if not user.is_active: raise HTTPException(403,"Conta desativada")
+    user.last_login_at=datetime.now(timezone.utc)
     db.commit()
     return Token(access_token=create_token(user.id))
 
@@ -322,3 +324,32 @@ def create_support_ticket(data:SupportTicketIn,user:User=Depends(current_user),d
 @router.get("/admin/overview")
 def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
     return {"organizations":db.scalar(select(func.count()).select_from(Organization)),"users":db.scalar(select(func.count()).select_from(User)),"patients":db.scalar(select(func.count()).select_from(Patient))}
+
+@router.get("/admin/users")
+def admin_users(user:User=Depends(admin),db:Session=Depends(get_db)):
+    query=(select(User,Organization,Subscription,Plan)
+        .join(Organization,Organization.id==User.organization_id)
+        .outerjoin(Subscription,Subscription.organization_id==Organization.id)
+        .outerjoin(Plan,Plan.id==Subscription.plan_id)
+        .order_by(User.created_at.desc()))
+    today=datetime.now(timezone.utc).date(); result=[]
+    for account,organization,subscription,plan in db.execute(query).all():
+        access=subscription_access(subscription,today) if subscription else {"blocked":False,"phase":"no_plan"}
+        if not account.is_active: access_status="inactive"
+        elif account.email_verified_at is None: access_status="pending_email"
+        elif access["blocked"]: access_status="blocked"
+        else: access_status=str(access["phase"])
+        created_date=subscription.created_at.date() if subscription else None
+        result.append({
+            "id":account.id,"name":account.name,"email":account.email,"organization":organization.name,
+            "role":account.role.value,"profession":account.profession_other or account.profession,
+            "is_active":account.is_active,"email_verified":account.email_verified_at is not None,
+            "access_status":access_status,"last_login_at":account.last_login_at,"created_at":account.created_at,
+            "plan_name":plan.name if plan else None,"plan_status":subscription.status.value if subscription else None,
+            "billing_cycle":subscription.billing_cycle.value if subscription else None,
+            "plan_started_at":subscription.created_at if subscription else None,
+            "plan_ends_at":subscription.current_period_end if subscription else None,
+            "plan_days":(today-created_date).days if created_date else None,
+            "days_remaining":(subscription.current_period_end-today).days if subscription and subscription.current_period_end else None,
+        })
+    return result

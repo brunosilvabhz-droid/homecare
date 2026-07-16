@@ -7,8 +7,8 @@ from app.db.base import Base
 from app.db.session import engine
 from app.main import app
 from app.db.session import SessionLocal
-from app.models import User, Responsible, Subscription, SubscriptionStatus, BillingCycle
-from app.core.security import create_email_token, create_password_reset_token
+from app.models import User, Organization, Role, Responsible, Subscription, SubscriptionStatus, BillingCycle
+from app.core.security import create_email_token, create_password_reset_token, create_token, hash_password
 from app.core.subscriptions import subscription_access
 from app.subscription_reminders import run as run_subscription_reminders
 client=TestClient(app)
@@ -36,6 +36,13 @@ def test_tenant_flow(monkeypatch):
     assert client.post("/api/v1/auth/reset-password",json={"token":reset,"password":"novaSenha123"}).status_code==200
     payload["password"]="novaSenha123"
     token=client.post("/api/v1/auth/login",json={"email":payload["email"],"password":payload["password"]}).json()["access_token"]; headers={"Authorization":f"Bearer {token}"}
+    with SessionLocal() as db:
+        account=db.query(User).filter(User.email==payload["email"]).one(); assert account.last_login_at is not None
+        admin_org=Organization(name="Impacto Care Admin Test"); db.add(admin_org); db.flush()
+        admin_user=User(organization_id=admin_org.id,name="Administrador Geral",email="admin-geral@example.com",password_hash=hash_password("AdminSegura123"),role=Role.ADMIN,email_verified_at=datetime.now(ZoneInfo("America/Sao_Paulo"))); db.add(admin_user); db.commit(); admin_id=admin_user.id
+    assert client.get("/api/v1/admin/users",headers=headers).status_code==403
+    admin_headers={"Authorization":f"Bearer {create_token(admin_id)}"}; admin_users=client.get("/api/v1/admin/users",headers=admin_headers)
+    assert admin_users.status_code==200 and any(item["email"]==payload["email"] and item["last_login_at"] for item in admin_users.json())
     monkeypatch.setattr("app.api.settings.google_client_id","google-client-test")
     monkeypatch.setattr("app.api.google_id_token.verify_oauth2_token",lambda credential,request,audience:{"sub":"google-ana-1","email":payload["email"],"email_verified":True,"name":"Ana Souza"})
     google_login=client.post("/api/v1/auth/google",json={"credential":"valid-google-token"})
