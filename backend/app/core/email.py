@@ -6,6 +6,21 @@ from app.core.security import create_email_token, create_password_reset_token
 
 logger=logging.getLogger(__name__)
 
+def send_relationship_email(email:str,subject:str,content:str,action_label:str|None=None,action_url:str|None=None)->bool:
+    if not settings.smtp_host:
+        logger.warning("SMTP não configurado. Automação '%s' destinada a %s",subject,email)
+        return False
+    message=EmailMessage();message["Subject"]=subject;message["From"]=settings.smtp_from_email;message["To"]=email
+    body=content.strip()
+    if action_label and action_url: body+=f"\n\n{action_label}:\n{action_url}"
+    body+="\n\nImpacto Care — plataforma de gestão para atendimento domiciliar."
+    message.set_content(body)
+    with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=15) as smtp:
+        if settings.smtp_use_tls: smtp.starttls()
+        if settings.smtp_username: smtp.login(settings.smtp_username,settings.smtp_password or "")
+        smtp.send_message(message)
+    return True
+
 def send_verification_email(user_id:str,email:str)->None:
     link=f"{settings.frontend_url.rstrip('/')}/confirmar-email?token={create_email_token(user_id)}"
     if not settings.smtp_host:

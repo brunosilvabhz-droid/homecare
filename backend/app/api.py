@@ -24,7 +24,8 @@ from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
 from app.core.ai import generate_analysis
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog
+from app.relationship_automation import ensure_templates
 from app.onboarding import event as product_event, status as onboarding_status
 from app.schemas import *
 router=APIRouter()
@@ -525,6 +526,12 @@ def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-acc
             item.status=SubscriptionStatus.ACTIVE;item.cancel_at_period_end=False;item.cancellation_requested_at=None
             if item.pending_plan_id: item.plan_id=item.pending_plan_id;item.pending_plan_id=None
             days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
+            account_user=db.scalar(select(User).where(User.organization_id==item.organization_id,User.role==Role.PROFESSIONAL).order_by(User.created_at))
+            if account_user:
+                if not account_user.first_paid_at: account_user.first_paid_at=datetime.now(timezone.utc)
+                product_event(db,account_user,"payment_confirmed","asaas",{"cycle":item.billing_cycle.value})
+                product_event(db,account_user,"subscription_activated","asaas",{"cycle":item.billing_cycle.value})
+            db.query(CommunicationLog).filter(CommunicationLog.organization_id==item.organization_id,CommunicationLog.status.in_(["pending","scheduled"])).update({"status":"canceled","skip_reason":"Pagamento confirmado"},synchronize_session=False)
         elif event_type in {"PAYMENT_OVERDUE","PAYMENT_DUNNING_REQUESTED"}: item.status=SubscriptionStatus.PAST_DUE
         elif event_type in {"PAYMENT_REFUNDED","PAYMENT_DELETED"}: item.status=SubscriptionStatus.CANCELED
         if payment.get("subscription"): item.external_id=payment["subscription"]
@@ -551,6 +558,31 @@ def create_support_ticket(data:SupportTicketIn,user:User=Depends(current_user),d
 @router.get("/admin/overview")
 def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
     return {"organizations":db.scalar(select(func.count()).select_from(Organization)),"users":db.scalar(select(func.count()).select_from(User)),"patients":db.scalar(select(func.count()).select_from(Patient))}
+@router.get("/admin/relationship/automations")
+def admin_automations(user:User=Depends(admin),db:Session=Depends(get_db)):
+    rows=ensure_templates(db);db.commit();result=[]
+    for item in rows.values():
+        sent=db.scalar(select(func.count()).select_from(CommunicationLog).where(CommunicationLog.automation_id==item.id,CommunicationLog.status=="sent")) or 0
+        failed=db.scalar(select(func.count()).select_from(CommunicationLog).where(CommunicationLog.automation_id==item.id,CommunicationLog.status=="failed")) or 0
+        last=db.scalar(select(func.max(CommunicationLog.attempted_at)).where(CommunicationLog.automation_id==item.id))
+        result.append({"id":item.id,"code":item.code,"name":item.name,"channel":item.channel,"trigger_type":item.trigger_type,"offset_days":item.offset_days,"subject":item.subject,"content":item.content,"action_path":item.action_path,"is_active":item.is_active,"promotional":item.promotional,"sent":sent,"failed":failed,"last_run_at":last})
+    return result
+@router.patch("/admin/relationship/automations/{automation_id}")
+def admin_update_automation(automation_id:str,data:AutomationUpdate,user:User=Depends(admin),db:Session=Depends(get_db)):
+    item=db.get(CommunicationAutomation,automation_id)
+    if not item:raise HTTPException(404,"Automação não encontrada")
+    for key,value in data.model_dump(exclude_none=True).items():setattr(item,key,value)
+    audit(db,user,"update","relationship_automation");db.commit();return {"updated":True}
+@router.get("/admin/relationship/logs")
+def admin_communication_logs(status:str|None=None,limit:int=100,user:User=Depends(admin),db:Session=Depends(get_db)):
+    q=select(CommunicationLog).order_by(CommunicationLog.created_at.desc()).limit(max(1,min(limit,500)))
+    if status:q=q.where(CommunicationLog.status==status)
+    return [{"id":x.id,"user_id":x.user_id,"template":x.template_code,"channel":x.channel,"status":x.status,"attempts":x.attempts,"scheduled_at":x.scheduled_at,"sent_at":x.sent_at,"error":x.error_message} for x in db.scalars(q).all()]
+@router.get("/admin/relationship/metrics")
+def admin_relationship_metrics(user:User=Depends(admin),db:Session=Depends(get_db)):
+    total=db.scalar(select(func.count()).select_from(User).where(User.role==Role.PROFESSIONAL)) or 0;confirmed=db.scalar(select(func.count()).select_from(User).where(User.role==Role.PROFESSIONAL,User.email_verified_at.is_not(None))) or 0;activated=db.scalar(select(func.count()).select_from(User).where(User.role==Role.PROFESSIONAL,User.activated_at.is_not(None))) or 0;paid=db.scalar(select(func.count()).select_from(Subscription).where(Subscription.status==SubscriptionStatus.ACTIVE)) or 0
+    avg_days=db.scalar(select(func.avg(func.extract("epoch",User.activated_at-User.created_at)/86400)).where(User.activated_at.is_not(None))) if db.bind.dialect.name!="sqlite" else None
+    return {"registered":total,"email_confirmed":confirmed,"activated":activated,"paid":paid,"activation_rate":round(activated/total*100,1) if total else 0,"conversion_rate":round(paid/total*100,1) if total else 0,"average_activation_days":round(float(avg_days),1) if avg_days is not None else None,"messages_sent":db.scalar(select(func.count()).select_from(CommunicationLog).where(CommunicationLog.status=="sent")) or 0,"message_failures":db.scalar(select(func.count()).select_from(CommunicationLog).where(CommunicationLog.status=="failed")) or 0}
 @router.get("/admin/settings")
 def admin_get_settings(user:User=Depends(admin),db:Session=Depends(get_db)):
     plan=db.scalar(select(Plan).where(Plan.code=="pro"))

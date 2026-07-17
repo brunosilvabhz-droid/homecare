@@ -13,6 +13,7 @@ from app.core.security import create_email_token, create_password_reset_token, c
 from app.core.subscriptions import subscription_access
 from app.subscription_reminders import run as run_subscription_reminders
 from app.automation_worker import run_once as run_whatsapp_automation
+from app.relationship_automation import run_once as run_relationship_automation
 client=TestClient(app)
 def setup_module(): Base.metadata.create_all(engine)
 def teardown_module(): Base.metadata.drop_all(engine)
@@ -164,6 +165,10 @@ def test_tenant_flow(monkeypatch):
     automation_now=datetime.now(ZoneInfo("UTC"))
     assert run_whatsapp_automation(automation_now)>=1
     assert run_whatsapp_automation(automation_now)==0
+    relationship_now=datetime.now(ZoneInfo("America/Sao_Paulo")).replace(hour=12,minute=0,second=0,microsecond=0).astimezone(ZoneInfo("UTC"))
+    monkeypatch.setattr("app.relationship_automation.send_relationship_email",lambda *args:True)
+    assert run_relationship_automation(relationship_now)>=1
+    assert run_relationship_automation(relationship_now)==0
     with SessionLocal() as db: assert db.query(WhatsAppConfirmation).filter(WhatsAppConfirmation.visit_id==future.json()["id"],WhatsAppConfirmation.status=="sent").count()==1
     period_end=client.get("/api/v1/billing/subscription",headers=headers).json()["current_period_end"]
     card_received={"id":"evt_test_card_received","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"billingType":"CREDIT_CARD","subscription":"sub_test_1"}}

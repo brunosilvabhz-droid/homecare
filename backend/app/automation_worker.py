@@ -10,6 +10,7 @@ from app.core.subscriptions import subscription_access
 from app.core.whatsapp import configured, send_confirmation
 from app.db.session import SessionLocal
 from app.models import Visit, VisitStatus, Subscription, Plan, WhatsAppConfirmation
+from app.relationship_automation import run_once as run_relationship_once
 
 log=logging.getLogger("impactocare.automation");LOCAL_TZ=ZoneInfo("America/Sao_Paulo")
 def confirmation_url(visit:Visit)->str:
@@ -45,7 +46,9 @@ def run_once(now:datetime|None=None)->int:
 def main():
     logging.basicConfig(level=logging.INFO)
     while True:
-        try: log.info("Confirmações enviadas: %s",run_once())
+        try:
+            log.info("Confirmações enviadas: %s",run_once())
+            log.info("Comunicações de relacionamento enviadas: %s",run_relationship_once())
         except Exception: log.exception("Falha no ciclo de automação")
         time.sleep(max(settings.automation_interval_seconds,60))
 if __name__=="__main__": main()

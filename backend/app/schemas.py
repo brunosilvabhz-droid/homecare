@@ -88,3 +88,4 @@ class AIAnalysisOut(Out): id:str;visit_id:str;analysis_type:str;content:dict;mod
 class CommunicationPreferences(BaseModel): email_operational:bool=True; email_guidance:bool=True; email_billing:bool=True; email_marketing:bool=False; whatsapp_allowed:bool=False
 class OnboardingStep(BaseModel): code:str; title:str; benefit:str; action_path:str; completed:bool; completed_at:datetime|None=None
 class OnboardingStatus(BaseModel): progress:int; completed_steps:int; total_steps:int; activated:bool; activated_at:datetime|None=None; days_to_activation:int|None=None; steps:list[OnboardingStep]; next_action:OnboardingStep|None=None
+class AutomationUpdate(BaseModel): is_active:bool|None=None; subject:str|None=Field(default=None,min_length=2,max_length=180); content:str|None=Field(default=None,min_length=10,max_length=10000); offset_days:int|None=Field(default=None,ge=-30,le=365)
