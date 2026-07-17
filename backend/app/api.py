@@ -53,6 +53,10 @@ def sync_patient_finance(db:Session,patient:Patient):
     if patient.session_value and patient.session_count:
         for index in range(paid,patient.session_count):
             db.add(FinanceEntry(organization_id=patient.organization_id,patient_id=patient.id,entry_type="income",source="patient_sessions",description=f"Sessão {index+1}/{patient.session_count} — {patient.name}",amount=patient.session_value,due_date=datetime.now(timezone.utc).date()+timedelta(days=index*7),paid=False))
+@router.get("/auth/config")
+def auth_config(db:Session=Depends(get_db)):
+    operational=platform_settings(db)
+    return {"google_client_id":settings.google_client_id if operational.google_login_enabled else None,"google_enabled":bool(settings.google_client_id and operational.google_login_enabled)}
 @router.post("/auth/register",response_model=Message,status_code=201)
 def register(data:Register,db:Session=Depends(get_db)):
     operational=platform_settings(db)
