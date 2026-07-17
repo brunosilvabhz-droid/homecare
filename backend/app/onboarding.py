@@ -39,6 +39,9 @@ def sync_milestones(db:Session,user:User)->dict:
         "availability":bool(db.scalar(select(ProfessionalAvailability.id).where(ProfessionalAvailability.professional_id==user.id).limit(1))),
         "family":bool(db.scalar(select(Responsible.id).where(Responsible.organization_id==user.organization_id,Responsible.portal_user_id.is_not(None)).limit(1))),
     }
+    event_names={"email":"email_confirmed","profile":"profile_completed","patient":"first_patient_created","schedule":"first_schedule_created","record":"first_attendance_record_created","pdf":"first_pdf_generated","ai":"first_ai_use","finance":"first_financial_entry","availability":"availability_configured","family":"family_portal_accessed"}
+    for code,completed in flags.items():
+        if completed:event(db,user,event_names[code])
     if changed: db.flush()
     return flags
 
