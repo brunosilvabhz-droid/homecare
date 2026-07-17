@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.schemas import PatientIn, Register
+from app.schemas import PatientIn, PatientOut, Register
 
 
 def registration(**changes):
@@ -42,3 +42,10 @@ def test_patient_accepts_landline_but_rejects_invalid_phone():
     assert PatientIn(name="Maria", phone="(31) 3333-4444").phone == "3133334444"
     with pytest.raises(ValidationError):
         PatientIn(name="Maria", phone="3333-4444")
+
+
+def test_legacy_patient_remains_readable_but_cannot_be_written_again():
+    legacy={"id":"legacy-1","organization_id":"org-1","created_at":"2026-01-01T00:00:00Z","name":"Paciente demo","cpf":"00000000101","phone":"319999999"}
+    assert PatientOut.model_validate(legacy).cpf=="00000000101"
+    with pytest.raises(ValidationError):
+        PatientIn(name="Paciente demo",cpf="00000000101",phone="319999999")

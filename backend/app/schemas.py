@@ -79,14 +79,27 @@ class PatientIn(BaseModel):
     @field_validator("phone")
     @classmethod
     def valid_phone(cls,value): return brazilian_phone(value) if value else value
-class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
+class PatientOut(PatientIn, Out):
+    id:str; organization_id:str; created_at:datetime
+    # Compatibilidade de leitura com dados anteriores à validação brasileira.
+    # PatientIn continua bloqueando CPF e telefone inválidos em toda escrita.
+    @field_validator("cpf",mode="before")
+    @classmethod
+    def valid_cpf(cls,value): return "".join(filter(str.isdigit,value)) if value else value
+    @field_validator("phone",mode="before")
+    @classmethod
+    def valid_phone(cls,value): return "".join(filter(str.isdigit,value)) if value else value
 class PatientPortalInvite(BaseModel): name:str=Field(min_length=3,max_length=120); email:EmailStr
 class ResponsibleIn(BaseModel):
     patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
     @field_validator("phone")
     @classmethod
     def valid_phone(cls,value): return brazilian_phone(value) if value else value
-class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
+class ResponsibleOut(ResponsibleIn, Out):
+    id:str; portal_user_id:str|None=None
+    @field_validator("phone",mode="before")
+    @classmethod
+    def valid_phone(cls,value): return "".join(filter(str.isdigit,value)) if value else value
 class VisitIn(BaseModel): patient_id:str; starts_at:datetime; duration_minutes:int=60; notes:str|None=None
 class VisitOut(Out): id:str; patient_id:str; professional_id:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; notes:str|None; confirmation_manual_sent_at:datetime|None; confirmation_automatic_sent_at:datetime|None; patient_response:str|None; patient_responded_at:datetime|None; patient:PatientOut
 class RecordIn(BaseModel): patient_id:str; visit_id:str|None=None; occurred_at:datetime|None=None; summary:str; guidance:str|None=None; weight_kg:Decimal|None=Field(default=None,gt=0,le=500); blood_pressure_systolic:int|None=Field(default=None,ge=40,le=300); blood_pressure_diastolic:int|None=Field(default=None,ge=20,le=200); heart_rate_bpm:int|None=Field(default=None,ge=20,le=300); respiratory_rate_bpm:int|None=Field(default=None,ge=4,le=100); temperature_c:Decimal|None=Field(default=None,ge=25,le=45); oxygen_saturation_percent:int|None=Field(default=None,ge=50,le=100); blood_glucose_mg_dl:int|None=Field(default=None,ge=20,le=1000); responsible_name:str|None=None; signature_data:str|None=None

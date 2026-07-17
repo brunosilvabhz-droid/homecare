@@ -32,6 +32,7 @@ PATIENTS=[
     {"name":"Ana Laura Ferreira","birth_date":date(1963,11,4),"phone":"31988881003","address":"Rua Pium-í","address_number":"780","neighborhood":"Sion","postal_code":"30310220","conditions":"Dor lombar recorrente","medications":"Analgésico eventual informado pela paciente","allergies":"Sem alergias informadas","care_needs":"Mobilidade, educação postural e exercícios domiciliares","mobility":"Independente","session_value":Decimal("140.00")},
     {"name":"Carlos Eduardo Silva","birth_date":date(1971,6,19),"phone":"31988881004","address":"Rua Padre Eustáquio","address_number":"1750","neighborhood":"Padre Eustáquio","postal_code":"30720100","conditions":"Recuperação de lesão no ombro direito","medications":"Anti-inflamatório anteriormente informado","allergies":"Sem alergias informadas","care_needs":"Amplitude de movimento e fortalecimento progressivo","mobility":"Independente","session_value":Decimal("160.00")},
 ]
+DEMO_CPFS=["52998224725","16899535009","11144477735","39053344705"]
 
 def local_at(days:int,hour:int,minute:int=0)->datetime:
     current=datetime.now(timezone.utc).astimezone()
@@ -75,7 +76,7 @@ def create(db,password:str):
     for weekday in range(5):db.add(ProfessionalAvailability(organization_id=org.id,professional_id=user.id,weekday=weekday,start_time=time(8),end_time=time(18),is_active=True))
     patients=[]
     for index,data in enumerate(PATIENTS):
-        patient=Patient(organization_id=org.id,status="active",cpf=f"00000000{index+101:03d}",gender="Não informado",email=f"familia.demo{index+1}@example.com",city="Belo Horizonte",state="MG",latitude=-19.92-(index*.006),longitude=-43.94-(index*.005),session_count=12,notes="Dados fictícios criados exclusivamente para demonstração.",**data)
+        patient=Patient(organization_id=org.id,status="active",cpf=DEMO_CPFS[index],gender="Não informado",email=f"familia.demo{index+1}@example.com",city="Belo Horizonte",state="MG",latitude=-19.92-(index*.006),longitude=-43.94-(index*.005),session_count=12,notes="Dados fictícios criados exclusivamente para demonstração.",**data)
         db.add(patient);db.flush();patients.append(patient)
         db.add(Responsible(organization_id=org.id,patient_id=patient.id,name=["Fernanda Oliveira","Mariana Mendes","Paulo Ferreira","Renata Silva"][index],relationship=["Filha","Filha","Filho","Esposa"][index],phone=f"3197777200{index+1}",email=f"responsavel.demo{index+1}@example.com"))
     schedule=[(-42,9,0),(-35,14,0),(-28,10,30),(-21,15,0),(-14,9,0),(-7,13,30),(-3,10,0),(1,9,0),(2,11,0),(3,14,30),(5,8,30),(7,15,0),(9,10,0),(12,13,30),(15,9,30),(18,16,0)]
