@@ -54,6 +54,8 @@ def test_tenant_flow(monkeypatch):
     ticket=client.post("/api/v1/support/tickets",json={"category":"error","description":"A agenda não carregou durante o teste."},headers=headers)
     assert ticket.status_code==201 and ticket.json()["ticket_number"].startswith("ICP-") and ticket.json()["email_sent_at"]
     assert client.get("/api/v1/support/tickets",headers=headers).json()[0]["ticket_number"]==ticket.json()["ticket_number"]
+    admin_ticket=client.get("/api/v1/admin/support/tickets",headers=admin_headers).json()[0]
+    assert admin_ticket["requester_name"]==payload["name"] and admin_ticket["requester_email"]==payload["email"] and admin_ticket["description"]
     patient=client.post("/api/v1/patients",json={"name":"Maria","phone":"31999999999","email":"maria@example.com","address":"Praça Sete","city":"Belo Horizonte","state":"MG","responsible":{"name":"Carlos","relationship":"Filho","phone":"31988888888"}},headers=headers)
     assert patient.status_code==201
     assert client.get("/api/v1/patients",headers=headers).json()[0]["name"]=="Maria"
@@ -125,6 +127,10 @@ def test_tenant_flow(monkeypatch):
     checkout_webhook=client.post("/api/v1/webhooks/asaas",json=checkout_event,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"})
     assert checkout_webhook.status_code==200
     assert client.get("/api/v1/billing/subscription",headers=headers).json()["status"]=="active"
+    monkeypatch.setattr("app.api.cancel_asaas_subscription",lambda external_id:(_ for _ in ()).throw(AssertionError("PIX não possui recorrência externa")))
+    canceled=client.post("/api/v1/billing/cancel",headers=headers)
+    assert canceled.status_code==200 and canceled.json()["cancel_at_period_end"] is True
+    assert client.get("/api/v1/billing/subscription",headers=headers).json()["cancel_at_period_end"] is True
     period_end=client.get("/api/v1/billing/subscription",headers=headers).json()["current_period_end"]
     card_received={"id":"evt_test_card_received","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"billingType":"CREDIT_CARD","subscription":"sub_test_1"}}
     assert client.post("/api/v1/webhooks/asaas",json=card_received,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"}).status_code==200
@@ -132,7 +138,7 @@ def test_tenant_flow(monkeypatch):
     subscription=client.get("/api/v1/billing/subscription",headers=headers)
     assert subscription.status_code==200 and subscription.json()["status"]=="active"
     with SessionLocal() as db:
-        item=db.get(Subscription,subscription_id);item.billing_cycle=BillingCycle.MONTHLY;item.current_period_end=datetime.now().date()-timedelta(days=5);db.commit()
+        item=db.get(Subscription,subscription_id);item.billing_cycle=BillingCycle.MONTHLY;item.cancel_at_period_end=False;item.current_period_end=datetime.now().date()-timedelta(days=5);db.commit()
     assert client.get("/api/v1/dashboard",headers=headers).status_code==200
     with SessionLocal() as db:
         item=db.get(Subscription,subscription_id);item.current_period_end=datetime.now().date()-timedelta(days=6);db.commit()

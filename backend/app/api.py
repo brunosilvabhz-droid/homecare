@@ -21,7 +21,7 @@ from app.core.email import send_verification_email, send_password_reset_email, s
 from app.core.routing import geocode, calculate_route, money
 from app.core.config import settings
 from app.core.captcha import verify_turnstile
-from app.core.billing import create_asaas_checkout
+from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
 from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting
 from app.schemas import *
@@ -404,7 +404,7 @@ def subscription(user:User=Depends(account_professional),db:Session=Depends(get_
     item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Assinatura não encontrada")
     plan=db.get(Plan,item.plan_id)
-    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price},"gateway":item.gateway,**subscription_access(item)}
+    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price},"gateway":item.gateway,"cancel_at_period_end":item.cancel_at_period_end,"cancellation_requested_at":item.cancellation_requested_at,**subscription_access(item)}
 @router.post("/billing/checkout")
 def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional),db:Session=Depends(get_db)):
     item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id)); plan=db.get(Plan,item.plan_id) if item else None
@@ -416,8 +416,19 @@ def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional)
     if data.payment_method!="pix": payload["subscription"]={"cycle":cycle,"nextDueDate":first_due.isoformat()}
     checkout=create_asaas_checkout(payload); checkout_id=checkout.get("id")
     if not checkout_id: raise HTTPException(502,"Resposta inválida do ASAAS")
-    item.gateway="asaas";item.external_id=checkout_id;item.billing_cycle=data.billing_cycle;db.commit()
+    item.gateway="asaas";item.external_id=checkout_id;item.billing_cycle=data.billing_cycle;item.cancel_at_period_end=False;item.cancellation_requested_at=None;db.commit()
     return {"checkout_url":checkout.get("link") or f"{settings.asaas_checkout_url}?id={checkout_id}","expires_in_minutes":60}
+@router.post("/billing/cancel")
+def cancel_subscription(user:User=Depends(account_professional),db:Session=Depends(get_db)):
+    item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
+    if not item: raise HTTPException(404,"Assinatura não encontrada")
+    if item.cancel_at_period_end:
+        return {"message":"O cancelamento já está programado.","current_period_end":item.current_period_end,"cancel_at_period_end":True}
+    recurring_id=item.external_id if item.external_id and item.external_id.startswith("sub_") else None
+    if recurring_id: cancel_asaas_subscription(recurring_id)
+    item.cancel_at_period_end=True;item.cancellation_requested_at=datetime.now(timezone.utc)
+    audit(db,user,"cancel_at_period_end","subscription");db.commit()
+    return {"message":"Cancelamento confirmado. O acesso permanecerá disponível até o fim da vigência já paga.","current_period_end":item.current_period_end,"cancel_at_period_end":True}
 @router.post("/webhooks/asaas")
 def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-access-token"),db:Session=Depends(get_db)):
     if not settings.asaas_webhook_token or not asaas_token or not secrets.compare_digest(asaas_token,settings.asaas_webhook_token): raise HTTPException(401,"Webhook não autorizado")
@@ -439,7 +450,7 @@ def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-acc
         billing_type=str(payment.get("billingType") or "").upper()
         payment_activates=event_type=="PAYMENT_CONFIRMED" or (event_type=="PAYMENT_RECEIVED" and billing_type!="CREDIT_CARD")
         if payment_activates:
-            item.status=SubscriptionStatus.ACTIVE;days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
+            item.status=SubscriptionStatus.ACTIVE;item.cancel_at_period_end=False;item.cancellation_requested_at=None;days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
         elif event_type in {"PAYMENT_OVERDUE","PAYMENT_DUNNING_REQUESTED"}: item.status=SubscriptionStatus.PAST_DUE
         elif event_type in {"PAYMENT_REFUNDED","PAYMENT_DELETED"}: item.status=SubscriptionStatus.CANCELED
         if payment.get("subscription"): item.external_id=payment["subscription"]
@@ -494,7 +505,8 @@ def admin_update_user(user_id:str,data:AdminUserUpdate,user:User=Depends(admin),
     audit(db,user,"update","user_access");db.commit();return {"message":"Usuário atualizado"}
 @router.get("/admin/support/tickets",response_model=list[SupportTicketOut])
 def admin_support_tickets(user:User=Depends(admin),db:Session=Depends(get_db)):
-    return db.scalars(select(SupportTicket).order_by(SupportTicket.created_at.desc())).all()
+    rows=db.execute(select(SupportTicket,User,Organization).join(User,User.id==SupportTicket.user_id).join(Organization,Organization.id==SupportTicket.organization_id).order_by(SupportTicket.created_at.desc())).all()
+    return [{**SupportTicketOut.model_validate(ticket).model_dump(),"requester_name":requester.name,"requester_email":requester.email,"organization_name":organization.name} for ticket,requester,organization in rows]
 @router.patch("/admin/support/tickets/{ticket_id}",response_model=SupportTicketOut)
 def admin_update_support_ticket(ticket_id:str,data:SupportTicketAdminUpdate,user:User=Depends(admin),db:Session=Depends(get_db)):
     item=db.get(SupportTicket,ticket_id)

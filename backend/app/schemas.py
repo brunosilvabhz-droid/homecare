@@ -31,7 +31,7 @@ class Login(BaseModel): email:EmailStr; password:str; captcha_token:str|None=Non
 class Token(BaseModel): access_token:str; token_type:str="bearer"
 class Message(BaseModel): message:str
 class SupportTicketIn(BaseModel): category:Literal["error","question","suggestion","request"]; description:str=Field(min_length=10,max_length=5000)
-class SupportTicketOut(Out): id:str; ticket_number:str; category:str; description:str; status:str; email_sent_at:datetime|None; admin_response:str|None; responded_at:datetime|None; closed_at:datetime|None; created_at:datetime
+class SupportTicketOut(Out): id:str; ticket_number:str; category:str; description:str; status:str; email_sent_at:datetime|None; admin_response:str|None; responded_at:datetime|None; closed_at:datetime|None; created_at:datetime; requester_name:str|None=None; requester_email:EmailStr|None=None; organization_name:str|None=None
 class SupportTicketAdminUpdate(BaseModel): response:str=Field(min_length=2,max_length=5000); close:bool=False
 class ProfilePhotoIn(BaseModel): content_base64:str; content_type:Literal["image/jpeg","image/png","image/webp"]
 class EmailAction(BaseModel): email:EmailStr
