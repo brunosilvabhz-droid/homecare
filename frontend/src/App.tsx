@@ -9,7 +9,7 @@ import {PrivacyPage,TermsPage} from './LegalPages';
 import SupportPage from './SupportPage';
 import {professions} from './formOptions';
 import {AvailabilityPage,PublicAppointmentPage} from './SchedulePages';
-import {RecordsPage,RecordDetailPage,PatientTimelinePage} from './RecordPages';
+import {RecordsPage,RecordDetailPage,PatientTimelinePage} from './RecordDocumentsPage';
 import ProfilePage from './ProfilePage';
 import AdminSupportPage from './AdminSupportPage';
 import AdminSettingsPage from './AdminSettingsPage';

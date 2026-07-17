@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone, time, timedelta
-import base64, binascii, hashlib, secrets
+import base64, binascii, hashlib, secrets, io, html
 import json
 import logging
 from google.auth.transport import requests as google_requests
@@ -9,6 +9,11 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Header, Request, Response
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from app.db.session import get_db
 from app.deps import current_user, professional, account_professional, admin
 from app.core.security import hash_password, verify_password, create_token, decode_email_token, decode_password_reset_token
@@ -144,6 +149,10 @@ def reset_password(data:PasswordReset,db:Session=Depends(get_db)):
     return Message(message="Senha redefinida com sucesso.")
 @router.get("/me",response_model=UserOut)
 def me(user:User=Depends(current_user)): return user
+@router.put("/me/professional-profile",response_model=UserOut)
+def update_professional_profile(data:ProfessionalProfileUpdate,user:User=Depends(professional),db:Session=Depends(get_db)):
+    for key,value in data.model_dump().items(): setattr(user,key,value)
+    audit(db,user,"update","professional_profile");db.commit();db.refresh(user);return user
 @router.put("/me/profile-photo",response_model=Message)
 def profile_photo(data:ProfilePhotoIn,user:User=Depends(professional),db:Session=Depends(get_db)):
     try: content=base64.b64decode(data.content_base64,validate=True)
@@ -229,7 +238,7 @@ def create_visit(data:VisitIn,user:User=Depends(professional),db:Session=Depends
 @router.get("/availability",response_model=AvailabilityOut)
 def get_availability(user:User=Depends(professional),db:Session=Depends(get_db)):
     windows=db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==user.id).order_by(ProfessionalAvailability.weekday,ProfessionalAvailability.start_time)).all()
-    return AvailabilityOut(default_session_duration_minutes=user.default_session_duration_minutes,windows=windows)
+    return AvailabilityOut(default_session_duration_minutes=user.default_session_duration_minutes,windows=windows,signature_name=user.signature_name or user.name,signature_council=user.signature_council or " ".join(filter(None,[user.council_name,user.council_code,user.council_state])),signature_profession=user.signature_profession or user.profession_other or user.profession)
 @router.put("/availability",response_model=AvailabilityOut)
 def save_availability(data:AvailabilitySettings,user:User=Depends(professional),db:Session=Depends(get_db)):
     grouped={}
@@ -239,7 +248,7 @@ def save_availability(data:AvailabilitySettings,user:User=Depends(professional),
     for windows in grouped.values():
         ordered=sorted(windows,key=lambda x:x.start_time)
         if any(a.end_time>b.start_time for a,b in zip(ordered,ordered[1:])): raise HTTPException(422,"Existem horários de trabalho sobrepostos")
-    db.query(ProfessionalAvailability).filter(ProfessionalAvailability.professional_id==user.id).delete();user.default_session_duration_minutes=data.default_session_duration_minutes
+    db.query(ProfessionalAvailability).filter(ProfessionalAvailability.professional_id==user.id).delete();user.default_session_duration_minutes=data.default_session_duration_minutes;user.signature_name=data.signature_name;user.signature_council=data.signature_council;user.signature_profession=data.signature_profession
     for window in data.windows: db.add(ProfessionalAvailability(**window.model_dump(),professional_id=user.id,organization_id=user.organization_id))
     audit(db,user,"update","availability");db.commit();return get_availability(user,db)
 @router.post("/visits/{visit_id}/confirmation-link",response_model=VisitConfirmationLink)
@@ -294,9 +303,23 @@ def record_detail(record_id:str,user:User=Depends(current_user),db:Session=Depen
     item=owned(db,ServiceRecord,record_id,user)
     if user.role==Role.FAMILY and item.patient.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
     return item
+@router.get("/records/{record_id}/pdf")
+def record_pdf(record_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    item=owned(db,ServiceRecord,record_id,user)
+    if user.role==Role.FAMILY and item.patient.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
+    styles=getSampleStyleSheet();styles.add(ParagraphStyle(name="Notice",parent=styles["BodyText"],fontSize=8,textColor=colors.HexColor("#555555"),borderColor=colors.HexColor("#dddddd"),borderWidth=1,borderPadding=8,spaceBefore=12))
+    buffer=io.BytesIO();document=SimpleDocTemplate(buffer,pagesize=A4,rightMargin=2*cm,leftMargin=2*cm,topMargin=2*cm,bottomMargin=2*cm,title="Registro de atendimento")
+    safe=lambda value:html.escape(str(value or "—")).replace("\n","<br/>")
+    story=[Paragraph("Impacto Care",styles["Title"]),Paragraph("Registro de atendimento",styles["Heading1"]),Spacer(1,10),Table([["Paciente",safe(item.patient.name)],["Data",item.occurred_at.astimezone(LOCAL_TZ).strftime("%d/%m/%Y às %H:%M")]],colWidths=[4*cm,11*cm],style=TableStyle([("GRID",(0,0),(-1,-1),.5,colors.HexColor("#dddddd")),("BACKGROUND",(0,0),(0,-1),colors.HexColor("#e8f5f1")),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),7)])),Spacer(1,14)]
+    vitals=[]
+    for label,value in [("Peso",f"{item.weight_kg} kg" if item.weight_kg else None),("Pressão arterial",f"{item.blood_pressure_systolic}/{item.blood_pressure_diastolic}" if item.blood_pressure_systolic and item.blood_pressure_diastolic else None),("Frequência cardíaca",f"{item.heart_rate_bpm} bpm" if item.heart_rate_bpm else None),("Frequência respiratória",f"{item.respiratory_rate_bpm} irpm" if item.respiratory_rate_bpm else None),("Temperatura",f"{item.temperature_c} °C" if item.temperature_c else None),("Saturação",f"{item.oxygen_saturation_percent}%" if item.oxygen_saturation_percent else None),("Glicemia",f"{item.blood_glucose_mg_dl} mg/dL" if item.blood_glucose_mg_dl else None)]:
+        if value: vitals.append([label,value])
+    if vitals: story.extend([Paragraph("Peso e sinais vitais informados",styles["Heading2"]),Table(vitals,colWidths=[6*cm,9*cm],style=TableStyle([("GRID",(0,0),(-1,-1),.5,colors.HexColor("#dddddd")),("PADDING",(0,0),(-1,-1),6)])),Spacer(1,12)])
+    story.extend([Paragraph("Descrição do atendimento",styles["Heading2"]),Paragraph(safe(item.summary),styles["BodyText"]),Spacer(1,12),Paragraph("Orientações",styles["Heading2"]),Paragraph(safe(item.guidance),styles["BodyText"]),Spacer(1,22),Paragraph(safe(item.professional_signature_name),styles["Heading3"]),Paragraph(safe(" · ".join(filter(None,[item.professional_signature_profession,item.professional_signature_council]))),styles["BodyText"]),Paragraph("Este documento é apenas um registro administrativo do atendimento, não possui valor legal e não substitui documentos clínicos oficiais, avaliações ou orientações emitidas por profissionais habilitados.",styles["Notice"])])
+    document.build(story);return Response(content=buffer.getvalue(),media_type="application/pdf",headers={"Content-Disposition":f'inline; filename="atendimento-{item.id}.pdf"'})
 @router.post("/records",response_model=RecordOut,status_code=201)
 def create_record(data:RecordIn,user:User=Depends(professional),db:Session=Depends(get_db)):
-    owned(db,Patient,data.patient_id,user); values=data.model_dump(exclude_none=True); item=ServiceRecord(**values,professional_id=user.id,organization_id=user.organization_id); db.add(item); audit(db,user,"create","service_record"); db.commit(); db.refresh(item); return item
+    owned(db,Patient,data.patient_id,user); values=data.model_dump(exclude_none=True); item=ServiceRecord(**values,professional_id=user.id,organization_id=user.organization_id,professional_signature_name=user.signature_name or user.name,professional_signature_council=user.signature_council or " ".join(filter(None,[user.council_name,user.council_code,user.council_state])),professional_signature_profession=user.signature_profession or user.profession_other or user.profession); db.add(item); audit(db,user,"create","service_record"); db.commit(); db.refresh(item); return item
 @router.get("/finance",response_model=list[FinanceOut])
 def finance(user:User=Depends(professional),db:Session=Depends(get_db)): return db.scalars(select(FinanceEntry).where(FinanceEntry.organization_id==user.organization_id).order_by(FinanceEntry.due_date.desc())).all()
 @router.post("/finance",response_model=FinanceOut,status_code=201)
