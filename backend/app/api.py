@@ -199,6 +199,17 @@ def dashboard_chart(user:User=Depends(professional),db:Session=Depends(get_db)):
         records_count=db.scalar(select(func.count()).select_from(ServiceRecord).where(ServiceRecord.organization_id==user.organization_id,ServiceRecord.occurred_at>=start_utc,ServiceRecord.occurred_at<end_utc)) or 0
         months.append(DashboardChartItem(label=start.strftime("%b/%y"),revenue=revenue,visits=visits_count,records=records_count))
     return months
+@router.get("/dashboard/finance-chart",response_model=list[FinanceChartItem])
+def dashboard_finance_chart(days:int=30,user:User=Depends(professional),db:Session=Depends(get_db)):
+    days=max(1,min(days,120));today=datetime.now(LOCAL_TZ).date();start=today-timedelta(days=days-1);end=today+timedelta(days=30);rows=[]
+    entries=db.scalars(select(FinanceEntry).where(FinanceEntry.organization_id==user.organization_id,FinanceEntry.due_date>=start,FinanceEntry.due_date<=end)).all();by_day={}
+    for entry in entries: by_day.setdefault(entry.due_date,[]).append(entry)
+    cursor=start
+    while cursor<=end:
+        daily=by_day.get(cursor,[]);past_or_today=cursor<=today
+        rows.append(FinanceChartItem(label=cursor.strftime("%d/%m"),revenue=sum((x.amount for x in daily if x.entry_type=="income" and x.paid and past_or_today),Decimal(0)),expenses=sum((x.amount for x in daily if x.entry_type=="expense" and x.paid and past_or_today),Decimal(0)),projected_revenue=sum((x.amount for x in daily if x.entry_type=="income" and not x.paid and cursor>=today),Decimal(0))))
+        cursor+=timedelta(days=1)
+    return rows
 @router.get("/patients",response_model=list[PatientOut])
 def patients(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(Patient).where(Patient.organization_id==user.organization_id)
@@ -265,9 +276,27 @@ def save_availability(data:AvailabilitySettings,user:User=Depends(professional),
     db.query(ProfessionalAvailability).filter(ProfessionalAvailability.professional_id==user.id).delete();user.default_session_duration_minutes=data.default_session_duration_minutes;user.signature_name=data.signature_name;user.signature_council=data.signature_council;user.signature_profession=data.signature_profession
     for window in data.windows: db.add(ProfessionalAvailability(**window.model_dump(),professional_id=user.id,organization_id=user.organization_id))
     audit(db,user,"update","availability");db.commit();return get_availability(user,db)
+@router.get("/availability/free-slots",response_model=list[AvailableSlot])
+def professional_free_slots(date_from:date|None=None,date_to:date|None=None,user:User=Depends(professional),db:Session=Depends(get_db)):
+    start=date_from or datetime.now(LOCAL_TZ).date();end=min(date_to or start+timedelta(days=6),start+timedelta(days=30));duration=user.default_session_duration_minutes;result=[];day=start
+    range_start=datetime.combine(start,time.min,tzinfo=LOCAL_TZ).astimezone(timezone.utc);range_end=datetime.combine(end,time.max,tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    visits=db.scalars(select(Visit).where(Visit.professional_id==user.id,Visit.status!=VisitStatus.CANCELED,Visit.starts_at>=range_start-timedelta(hours=8),Visit.starts_at<=range_end)).all()
+    while day<=end:
+        windows=db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==user.id,ProfessionalAvailability.weekday==day.weekday(),ProfessionalAvailability.is_active.is_(True))).all()
+        for window in windows:
+            candidate=datetime.combine(day,window.start_time,tzinfo=LOCAL_TZ);window_end=datetime.combine(day,window.end_time,tzinfo=LOCAL_TZ)
+            while candidate+timedelta(minutes=duration)<=window_end:
+                candidate_utc=candidate.astimezone(timezone.utc);candidate_end=candidate_utc+timedelta(minutes=duration);busy=False
+                for visit in visits:
+                    visit_start=visit.starts_at.replace(tzinfo=timezone.utc) if visit.starts_at.tzinfo is None else visit.starts_at
+                    if visit_start<candidate_end and visit_start+timedelta(minutes=visit.duration_minutes)>candidate_utc: busy=True;break
+                if candidate>datetime.now(LOCAL_TZ) and not busy: result.append(AvailableSlot(starts_at=candidate,ends_at=candidate+timedelta(minutes=duration)))
+                candidate+=timedelta(minutes=duration)
+        day+=timedelta(days=1)
+    return result
 @router.post("/visits/{visit_id}/confirmation-link",response_model=VisitConfirmationLink)
 def confirmation_link(visit_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
-    item=owned(db,Visit,visit_id,user);url=ensure_confirmation_url(db,item);db.commit();return VisitConfirmationLink(url=url)
+    item=owned(db,Visit,visit_id,user);url=ensure_confirmation_url(db,item);item.confirmation_manual_sent_at=datetime.now(timezone.utc);audit(db,user,"send_manual_confirmation","visit");db.commit();return VisitConfirmationLink(url=url)
 @router.get("/visits/{visit_id}/ai-analyses",response_model=list[AIAnalysisOut])
 def visit_ai_analyses(visit_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
     owned(db,Visit,visit_id,user);return db.scalars(select(AIAnalysis).where(AIAnalysis.visit_id==visit_id).order_by(AIAnalysis.created_at)).all()
@@ -532,6 +561,17 @@ def admin_update_user(user_id:str,data:AdminUserUpdate,user:User=Depends(admin),
     if data.is_active is not None: account.is_active=data.is_active
     if data.email_verified is True and account.email_verified_at is None: account.email_verified_at=datetime.now(timezone.utc)
     if data.email_verified is False: account.email_verified_at=None
+    subscription=db.scalar(select(Subscription).where(Subscription.organization_id==account.organization_id))
+    if data.plan_code or data.billing_cycle or data.complimentary_days is not None:
+        if not subscription: raise HTTPException(409,"A conta não possui assinatura para administrar")
+        if data.plan_code:
+            selected_plan=db.scalar(select(Plan).where(Plan.code==data.plan_code,Plan.active.is_(True)))
+            if not selected_plan: raise HTTPException(404,"Plano não encontrado")
+            subscription.plan_id=selected_plan.id;subscription.pending_plan_id=None
+        if data.billing_cycle: subscription.billing_cycle=data.billing_cycle
+        if data.complimentary_days is not None:
+            subscription.complimentary_until=datetime.now(LOCAL_TZ).date()+timedelta(days=data.complimentary_days) if data.complimentary_days else None
+            subscription.complimentary_note=data.complimentary_note.strip() if data.complimentary_note else None
     audit(db,user,"update","user_access");db.commit();return {"message":"Usuário atualizado"}
 @router.get("/admin/support/tickets",response_model=list[SupportTicketOut])
 def admin_support_tickets(user:User=Depends(admin),db:Session=Depends(get_db)):
@@ -570,5 +610,7 @@ def admin_users(user:User=Depends(admin),db:Session=Depends(get_db)):
             "plan_ends_at":subscription.current_period_end if subscription else None,
             "plan_days":(today-created_date).days if created_date else None,
             "days_remaining":(subscription.current_period_end-today).days if subscription and subscription.current_period_end else None,
+            "complimentary_until":subscription.complimentary_until if subscription else None,
+            "complimentary_note":subscription.complimentary_note if subscription else None,
         })
     return result

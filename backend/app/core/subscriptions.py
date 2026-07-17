@@ -3,6 +3,8 @@ from app.models import Subscription, SubscriptionStatus, BillingCycle
 
 def subscription_access(item:Subscription|None,today:date|None=None)->dict:
     today=today or date.today()
+    if item and item.complimentary_until and today<=item.complimentary_until:
+        return {"blocked":False,"phase":"complimentary","days_remaining":(item.complimentary_until-today).days,"grace_ends_at":None}
     if not item or not item.current_period_end:
         return {"blocked":True,"phase":"blocked","days_remaining":None,"grace_ends_at":None}
     end=item.current_period_end;days=(end-today).days

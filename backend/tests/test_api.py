@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 os.environ["DATABASE_URL"]="sqlite:///./test_impactocare.db"
 from fastapi.testclient import TestClient
@@ -67,10 +68,13 @@ def test_tenant_flow(monkeypatch):
     assert availability.status_code==200 and availability.json()["default_session_duration_minutes"]==45
     confirmation=client.post(f"/api/v1/visits/{visit.json()['id']}/confirmation-link",headers=headers)
     assert confirmation.status_code==200
+    assert client.get("/api/v1/visits",headers=headers).json()[0]["confirmation_manual_sent_at"]
     confirmation_token=confirmation.json()["url"].rsplit("/",1)[-1]
     assert client.post(f"/api/v1/public/visits/{confirmation_token}/response",json={"action":"confirm"}).json()["patient_response"]=="confirmed"
     slots=client.get(f"/api/v1/public/visits/{confirmation_token}/available-slots",params={"date_from":target.date().isoformat(),"date_to":target.date().isoformat()})
     assert slots.status_code==200 and slots.json()
+    professional_slots=client.get("/api/v1/availability/free-slots",params={"date_from":target.date().isoformat(),"date_to":target.date().isoformat()},headers=headers)
+    assert professional_slots.status_code==200 and professional_slots.json()
     monkeypatch.setattr("app.api.send_visit_change_email",lambda *args:True)
     changed=client.post(f"/api/v1/public/visits/{confirmation_token}/response",json={"action":"reschedule","new_starts_at":slots.json()[0]["starts_at"]})
     assert changed.status_code==200 and changed.json()["patient_response"]=="rescheduled" and changed.json()["duration_minutes"]==45
@@ -90,8 +94,10 @@ def test_tenant_flow(monkeypatch):
     assert client.patch(f"/api/v1/patients/{patient.json()['id']}",json=update,headers=headers).status_code==200
     automatic=[x for x in client.get("/api/v1/finance",headers=headers).json() if x.get("source")=="patient_sessions"]
     assert len(automatic)==3 and all(x["amount"]=="120.00" for x in automatic)
-    expense=client.post("/api/v1/finance",json={"entry_type":"expense","description":"Combustível","amount":"50.00","due_date":datetime.now().date().isoformat(),"paid":True},headers=headers)
-    assert expense.status_code==201 and expense.json()["entry_type"]=="expense"
+    expense=client.post("/api/v1/finance",json={"entry_type":"expense","category":"Combustível","description":"Combustível","amount":"50.00","due_date":datetime.now().date().isoformat(),"paid":True},headers=headers)
+    assert expense.status_code==201 and expense.json()["entry_type"]=="expense" and expense.json()["category"]=="Combustível"
+    chart=client.get("/api/v1/dashboard/finance-chart",params={"days":120},headers=headers)
+    assert chart.status_code==200 and any(Decimal(x["expenses"])>0 for x in chart.json())
     vehicle=client.post("/api/v1/vehicles",json={"name":"Carro","average_km_per_liter":"10","fuel_price":"6","additional_cost_per_km":"0.10","is_default":True},headers=headers)
     assert vehicle.status_code==201
     monkeypatch.setattr("app.api.geocode",lambda address:(-19.92,-43.94))
@@ -143,6 +149,10 @@ def test_tenant_flow(monkeypatch):
         premium=db.query(Plan).filter(Plan.code=="premium").first()
         if not premium: premium=Plan(code="premium",name="Impacto Care Premium",monthly_price="79.90",annual_monthly_price="59.90",ai_daily_limit=20,whatsapp_monthly_limit=100);db.add(premium);db.flush()
         item=db.get(Subscription,subscription_id);item.plan_id=premium.id;item.status=SubscriptionStatus.ACTIVE;item.cancel_at_period_end=False;db.commit()
+    managed=client.patch(f"/api/v1/admin/users/{account.id}",json={"is_active":True,"plan_code":"premium","billing_cycle":"annual","complimentary_days":45,"complimentary_note":"Parceria de avaliação"},headers=admin_headers)
+    assert managed.status_code==200
+    managed_row=next(x for x in client.get("/api/v1/admin/users",headers=admin_headers).json() if x["id"]==account.id)
+    assert managed_row["complimentary_until"] and managed_row["complimentary_note"]=="Parceria de avaliação"
     future=client.post("/api/v1/visits",json={"patient_id":patient.json()["id"],"starts_at":(datetime.now(ZoneInfo("UTC"))+timedelta(hours=12)).isoformat(),"duration_minutes":60},headers=headers)
     monkeypatch.setattr("app.automation_worker.configured",lambda:True);monkeypatch.setattr("app.automation_worker.send_confirmation",lambda *args:"wamid.test")
     automation_now=datetime.now(ZoneInfo("UTC"))
@@ -156,7 +166,7 @@ def test_tenant_flow(monkeypatch):
     subscription=client.get("/api/v1/billing/subscription",headers=headers)
     assert subscription.status_code==200 and subscription.json()["status"]=="active"
     with SessionLocal() as db:
-        item=db.get(Subscription,subscription_id);item.billing_cycle=BillingCycle.MONTHLY;item.cancel_at_period_end=False;item.current_period_end=datetime.now().date()-timedelta(days=5);db.commit()
+        item=db.get(Subscription,subscription_id);item.billing_cycle=BillingCycle.MONTHLY;item.cancel_at_period_end=False;item.complimentary_until=None;item.current_period_end=datetime.now().date()-timedelta(days=5);db.commit()
     assert client.get("/api/v1/dashboard",headers=headers).status_code==200
     with SessionLocal() as db:
         item=db.get(Subscription,subscription_id);item.current_period_end=datetime.now().date()-timedelta(days=6);db.commit()

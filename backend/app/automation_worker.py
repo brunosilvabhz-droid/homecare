@@ -37,7 +37,7 @@ def run_once(now:datetime|None=None)->int:
             if not delivery: delivery=WhatsAppConfirmation(organization_id=visit.organization_id,visit_id=visit.id,status="pending",attempts=0);db.add(delivery)
             delivery.attempts=(delivery.attempts or 0)+1;url=confirmation_url(visit);starts_at=visit.starts_at.replace(tzinfo=timezone.utc) if visit.starts_at.tzinfo is None else visit.starts_at;local=starts_at.astimezone(LOCAL_TZ)
             try:
-                delivery.provider_message_id=send_confirmation(visit.patient.phone,visit.patient.name,local.strftime("%d/%m/%Y"),local.strftime("%H:%M"),url);delivery.status="sent";delivery.sent_at=now;delivery.error_message=None;sent+=1
+                delivery.provider_message_id=send_confirmation(visit.patient.phone,visit.patient.name,local.strftime("%d/%m/%Y"),local.strftime("%H:%M"),url);delivery.status="sent";delivery.sent_at=now;delivery.error_message=None;visit.confirmation_automatic_sent_at=now;sent+=1
             except Exception as error:
                 delivery.status="failed";delivery.error_message=str(error)[:1000];log.exception("Falha no WhatsApp da visita %s",visit.id)
             db.commit()

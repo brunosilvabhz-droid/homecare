@@ -47,7 +47,7 @@ class PatientPortalInvite(BaseModel): name:str=Field(min_length=3,max_length=120
 class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
 class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
 class VisitIn(BaseModel): patient_id:str; starts_at:datetime; duration_minutes:int=60; notes:str|None=None
-class VisitOut(Out): id:str; patient_id:str; professional_id:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; notes:str|None; patient_response:str|None; patient:PatientOut
+class VisitOut(Out): id:str; patient_id:str; professional_id:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; notes:str|None; confirmation_manual_sent_at:datetime|None; confirmation_automatic_sent_at:datetime|None; patient_response:str|None; patient_responded_at:datetime|None; patient:PatientOut
 class RecordIn(BaseModel): patient_id:str; visit_id:str|None=None; occurred_at:datetime|None=None; summary:str; guidance:str|None=None; weight_kg:Decimal|None=Field(default=None,gt=0,le=500); blood_pressure_systolic:int|None=Field(default=None,ge=40,le=300); blood_pressure_diastolic:int|None=Field(default=None,ge=20,le=200); heart_rate_bpm:int|None=Field(default=None,ge=20,le=300); respiratory_rate_bpm:int|None=Field(default=None,ge=4,le=100); temperature_c:Decimal|None=Field(default=None,ge=25,le=45); oxygen_saturation_percent:int|None=Field(default=None,ge=50,le=100); blood_glucose_mg_dl:int|None=Field(default=None,ge=20,le=1000); responsible_name:str|None=None; signature_data:str|None=None
 class RecordOut(RecordIn,Out): id:str; professional_id:str; occurred_at:datetime; professional_signature_name:str|None; professional_signature_council:str|None; professional_signature_profession:str|None; patient:PatientOut
 class AvailabilityWindow(Out): weekday:int=Field(ge=0,le=6); start_time:time; end_time:time; is_active:bool=True
@@ -57,14 +57,16 @@ class VisitConfirmationLink(BaseModel): url:str
 class PublicVisitOut(BaseModel): patient_name:str; professional_name:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; patient_response:str|None
 class VisitResponseIn(BaseModel): action:Literal["confirm","cancel","reschedule"]; new_starts_at:datetime|None=None
 class AvailableSlot(BaseModel): starts_at:datetime; ends_at:datetime
-class FinanceIn(BaseModel): patient_id:str|None=None; entry_type:str="income"; description:str; amount:Decimal=Field(gt=0); due_date:date; paid:bool=False
+class FinanceIn(BaseModel): patient_id:str|None=None; entry_type:Literal["income","expense"]="income"; category:str=Field(default="Outros",min_length=2,max_length=60); description:str; amount:Decimal=Field(gt=0); due_date:date; paid:bool=False
 class FinanceOut(FinanceIn, Out): id:str; source:str|None=None; patient:PatientOut|None=None
 class Dashboard(BaseModel): patients:int; upcoming_visits:int; revenue_last_30_days:Decimal; receivable_next_30_days:Decimal
 class DashboardChartItem(BaseModel): label:str; revenue:Decimal; visits:int; records:int
+class FinanceChartItem(BaseModel): label:str; revenue:Decimal; expenses:Decimal; projected_revenue:Decimal
 class AdminSettings(BaseModel):
     platform_name:str=Field(default="Impacto Care",min_length=2,max_length=80); support_email:EmailStr="contato@impactocg.com"; registration_enabled:bool=True; maintenance_mode:bool=False; maintenance_message:str=Field(default="Estamos realizando uma manutenção programada.",max_length=500); trial_days:int=Field(default=30,ge=0,le=365); monthly_grace_days:int=Field(default=5,ge=0,le=60); session_timeout_minutes:int=Field(default=480,ge=15,le=10080); email_verification_required:bool=True; family_portal_enabled:bool=True; public_intake_enabled:bool=True; appointment_self_service_enabled:bool=True; routes_enabled:bool=True; finance_enabled:bool=True; google_login_enabled:bool=True; captcha_enabled:bool=True; billing_enabled:bool=True; pix_enabled:bool=True; card_enabled:bool=True; reminder_days:list[int]=[7,3,1]; default_session_minutes:int=Field(default=60,ge=15,le=480); max_profile_photo_mb:int=Field(default=1,ge=1,le=10); privacy_url:str="/privacidade"; terms_url:str="/termos"; footer_text:str="Impacto Care — gestão para atendimento domiciliar"; allow_family_reschedule:bool=True; max_reschedule_days:int=Field(default=30,ge=1,le=180)
 class AdminPlanUpdate(BaseModel): name:str=Field(min_length=2,max_length=80); monthly_price:Decimal=Field(ge=0); annual_monthly_price:Decimal=Field(ge=0); active:bool=True
-class AdminUserUpdate(BaseModel): is_active:bool|None=None; email_verified:bool|None=None
+class AdminUserUpdate(BaseModel):
+    is_active:bool|None=None; email_verified:bool|None=None; plan_code:Literal["pro","premium"]|None=None; billing_cycle:BillingCycle|None=None; complimentary_days:int|None=Field(default=None,ge=0,le=730); complimentary_note:str|None=Field(default=None,max_length=255)
 class SubscriptionOut(Out): id:str; status:str; billing_cycle:str; current_period_end:date|None; gateway:str|None
 class VehicleIn(BaseModel): name:str; fuel_type:str="gasoline"; average_km_per_liter:Decimal=Field(gt=0); fuel_price:Decimal=Field(ge=0); additional_cost_per_km:Decimal=Field(ge=0,default=0); is_default:bool=False
 class VehicleOut(VehicleIn,Out): id:str; organization_id:str
