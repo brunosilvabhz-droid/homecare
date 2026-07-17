@@ -23,7 +23,8 @@ from app.core.config import settings
 from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting
+from app.core.ai import generate_analysis
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation
 from app.schemas import *
 router=APIRouter()
 ADMIN_SETTINGS_KEY="platform"
@@ -40,6 +41,15 @@ def visit_by_token(db:Session,token:str):
     item=db.scalar(select(Visit).where(Visit.confirmation_token_hash==hashlib.sha256(token.encode()).hexdigest()))
     if not item: raise HTTPException(404,"Link de agendamento inválido")
     return item
+def ensure_confirmation_url(db:Session,item:Visit)->str:
+    token=secrets.token_urlsafe(32);item.confirmation_token_hash=hashlib.sha256(token.encode()).hexdigest()
+    return f"{settings.frontend_url.rstrip('/')}/agendamento/{token}"
+def ai_limit(db:Session,user:User)->tuple[int,int]:
+    subscription=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id));plan=db.get(Plan,subscription.plan_id) if subscription else None
+    limit=5 if subscription and subscription.status==SubscriptionStatus.TRIAL else (plan.ai_daily_limit if plan else 0)
+    local_now=datetime.now(LOCAL_TZ);start=local_now.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc);end=start+timedelta(days=1)
+    used=db.scalar(select(func.count()).select_from(AIAnalysis).where(AIAnalysis.organization_id==user.organization_id,AIAnalysis.created_at>=start,AIAnalysis.created_at<end)) or 0
+    return limit,used
 def slot_is_available(db:Session,visit:Visit,starts_at:datetime,duration:int)->bool:
     local=starts_at.astimezone(LOCAL_TZ); end=local+timedelta(minutes=duration)
     windows=db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==visit.professional_id,ProfessionalAvailability.weekday==local.weekday(),ProfessionalAvailability.is_active.is_(True))).all()
@@ -257,8 +267,22 @@ def save_availability(data:AvailabilitySettings,user:User=Depends(professional),
     audit(db,user,"update","availability");db.commit();return get_availability(user,db)
 @router.post("/visits/{visit_id}/confirmation-link",response_model=VisitConfirmationLink)
 def confirmation_link(visit_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
-    item=owned(db,Visit,visit_id,user);token=secrets.token_urlsafe(32);item.confirmation_token_hash=hashlib.sha256(token.encode()).hexdigest();db.commit()
-    return VisitConfirmationLink(url=f"{settings.frontend_url.rstrip('/')}/agendamento/{token}")
+    item=owned(db,Visit,visit_id,user);url=ensure_confirmation_url(db,item);db.commit();return VisitConfirmationLink(url=url)
+@router.get("/visits/{visit_id}/ai-analyses",response_model=list[AIAnalysisOut])
+def visit_ai_analyses(visit_id:str,user:User=Depends(professional),db:Session=Depends(get_db)):
+    owned(db,Visit,visit_id,user);return db.scalars(select(AIAnalysis).where(AIAnalysis.visit_id==visit_id).order_by(AIAnalysis.created_at)).all()
+@router.post("/visits/{visit_id}/ai-analysis",response_model=AIAnalysisOut)
+def create_visit_ai_analysis(visit_id:str,data:AIAnalysisCreate,user:User=Depends(professional),db:Session=Depends(get_db)):
+    visit=owned(db,Visit,visit_id,user);existing=db.scalar(select(AIAnalysis).where(AIAnalysis.visit_id==visit.id,AIAnalysis.analysis_type==data.analysis_type))
+    if existing: return existing
+    limit,used=ai_limit(db,user)
+    if limit<=0 or used>=limit: raise HTTPException(429,f"Limite diário de IA atingido ({used}/{limit}).")
+    records=db.scalars(select(ServiceRecord).where(ServiceRecord.patient_id==visit.patient_id,ServiceRecord.organization_id==user.organization_id).order_by(ServiceRecord.occurred_at.desc()).limit(6)).all()
+    if data.analysis_type=="evolution" and not any(record.visit_id==visit.id for record in records): raise HTTPException(409,"Salve o registro deste atendimento antes de gerar a evolução.")
+    patient=visit.patient
+    context={"conditions":patient.conditions,"medications":patient.medications,"allergies":patient.allergies,"care_needs":patient.care_needs,"mobility":patient.mobility,"scheduled_at":visit.starts_at.isoformat(),"recent_records":[{"occurred_at":record.occurred_at.isoformat(),"summary":record.summary,"guidance":record.guidance,"weight_kg":str(record.weight_kg) if record.weight_kg else None,"blood_pressure":f"{record.blood_pressure_systolic}/{record.blood_pressure_diastolic}" if record.blood_pressure_systolic and record.blood_pressure_diastolic else None,"heart_rate":record.heart_rate_bpm,"temperature":str(record.temperature_c) if record.temperature_c else None,"oxygen_saturation":record.oxygen_saturation_percent} for record in records]}
+    content,usage=generate_analysis(data.analysis_type,context)
+    item=AIAnalysis(organization_id=user.organization_id,visit_id=visit.id,patient_id=visit.patient_id,professional_id=user.id,analysis_type=data.analysis_type,content=content,model=settings.openai_model,input_tokens=usage.get("input_tokens"),output_tokens=usage.get("output_tokens"));db.add(item);audit(db,user,"generate",f"ai_{data.analysis_type}");db.commit();db.refresh(item);return item
 @router.get("/public/visits/{token}",response_model=PublicVisitOut)
 def public_visit(token:str,db:Session=Depends(get_db)):
     item=visit_by_token(db,token);professional_user=db.get(User,item.professional_id)
@@ -404,10 +428,14 @@ def subscription(user:User=Depends(account_professional),db:Session=Depends(get_
     item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Assinatura não encontrada")
     plan=db.get(Plan,item.plan_id)
-    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price},"gateway":item.gateway,"cancel_at_period_end":item.cancel_at_period_end,"cancellation_requested_at":item.cancellation_requested_at,**subscription_access(item)}
+    limit,used=ai_limit(db,user)
+    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"code":plan.code,"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price,"ai_daily_limit":limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit},"ai_used_today":used,"gateway":item.gateway,"cancel_at_period_end":item.cancel_at_period_end,"cancellation_requested_at":item.cancellation_requested_at,**subscription_access(item)}
+@router.get("/billing/plans")
+def billing_plans(db:Session=Depends(get_db)):
+    return [{"code":plan.code,"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"ai_daily_limit":plan.ai_daily_limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit} for plan in db.scalars(select(Plan).where(Plan.active.is_(True)).order_by(Plan.monthly_price)).all()]
 @router.post("/billing/checkout")
 def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional),db:Session=Depends(get_db)):
-    item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id)); plan=db.get(Plan,item.plan_id) if item else None
+    item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id)); plan=db.scalar(select(Plan).where(Plan.code==data.plan_code,Plan.active.is_(True)))
     if not item or not plan: raise HTTPException(404,"Assinatura não encontrada")
     first_due=item.current_period_end if item.status==SubscriptionStatus.TRIAL and item.current_period_end and item.current_period_end>datetime.now(timezone.utc).date() else datetime.now(timezone.utc).date()
     annual=data.billing_cycle==BillingCycle.ANNUAL; value=Decimal(plan.annual_monthly_price)*12 if annual else Decimal(plan.monthly_price); cycle="YEARLY" if annual else "MONTHLY"
@@ -416,7 +444,7 @@ def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional)
     if data.payment_method!="pix": payload["subscription"]={"cycle":cycle,"nextDueDate":first_due.isoformat()}
     checkout=create_asaas_checkout(payload); checkout_id=checkout.get("id")
     if not checkout_id: raise HTTPException(502,"Resposta inválida do ASAAS")
-    item.gateway="asaas";item.external_id=checkout_id;item.billing_cycle=data.billing_cycle;item.cancel_at_period_end=False;item.cancellation_requested_at=None;db.commit()
+    item.gateway="asaas";item.external_id=checkout_id;item.pending_plan_id=plan.id;item.billing_cycle=data.billing_cycle;item.cancel_at_period_end=False;item.cancellation_requested_at=None;db.commit()
     return {"checkout_url":checkout.get("link") or f"{settings.asaas_checkout_url}?id={checkout_id}","expires_in_minutes":60}
 @router.post("/billing/cancel")
 def cancel_subscription(user:User=Depends(account_professional),db:Session=Depends(get_db)):
@@ -450,7 +478,9 @@ def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-acc
         billing_type=str(payment.get("billingType") or "").upper()
         payment_activates=event_type=="PAYMENT_CONFIRMED" or (event_type=="PAYMENT_RECEIVED" and billing_type!="CREDIT_CARD")
         if payment_activates:
-            item.status=SubscriptionStatus.ACTIVE;item.cancel_at_period_end=False;item.cancellation_requested_at=None;days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
+            item.status=SubscriptionStatus.ACTIVE;item.cancel_at_period_end=False;item.cancellation_requested_at=None
+            if item.pending_plan_id: item.plan_id=item.pending_plan_id;item.pending_plan_id=None
+            days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
         elif event_type in {"PAYMENT_OVERDUE","PAYMENT_DUNNING_REQUESTED"}: item.status=SubscriptionStatus.PAST_DUE
         elif event_type in {"PAYMENT_REFUNDED","PAYMENT_DELETED"}: item.status=SubscriptionStatus.CANCELED
         if payment.get("subscription"): item.external_id=payment["subscription"]
@@ -480,7 +510,7 @@ def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
 @router.get("/admin/settings")
 def admin_get_settings(user:User=Depends(admin),db:Session=Depends(get_db)):
     plan=db.scalar(select(Plan).where(Plan.code=="pro"))
-    return {"settings":platform_settings(db).model_dump(mode="json"),"plan":{"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"active":plan.active} if plan else None,"integrations":{"smtp":bool(settings.smtp_host and settings.smtp_username),"google":bool(settings.google_oauth_client_id),"turnstile":bool(settings.turnstile_secret_key),"asaas":bool(settings.asaas_api_key),"asaas_webhook":bool(settings.asaas_webhook_token),"maps":bool(settings.geocoder_url and settings.routing_url)},"environment":{"frontend_url":settings.frontend_url,"asaas_environment":"produção" if "sandbox" not in settings.asaas_api_url else "homologação"}}
+    return {"settings":platform_settings(db).model_dump(mode="json"),"plan":{"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"active":plan.active} if plan else None,"integrations":{"smtp":bool(settings.smtp_host and settings.smtp_username),"google":bool(settings.google_oauth_client_id),"turnstile":bool(settings.turnstile_secret_key),"asaas":bool(settings.asaas_api_key),"asaas_webhook":bool(settings.asaas_webhook_token),"openai":bool(settings.openai_api_key),"whatsapp":bool(settings.whatsapp_access_token and settings.whatsapp_phone_number_id),"maps":bool(settings.geocoder_url and settings.routing_url)},"environment":{"frontend_url":settings.frontend_url,"asaas_environment":"produção" if "sandbox" not in settings.asaas_api_url else "homologação"}}
 @router.put("/admin/settings",response_model=AdminSettings)
 def admin_save_settings(data:AdminSettings,user:User=Depends(admin),db:Session=Depends(get_db)):
     item=db.scalar(select(SystemSetting).where(SystemSetting.key==ADMIN_SETTINGS_KEY))

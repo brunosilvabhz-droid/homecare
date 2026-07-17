@@ -7,10 +7,11 @@ from app.db.base import Base
 from app.db.session import engine
 from app.main import app
 from app.db.session import SessionLocal
-from app.models import User, Organization, Role, Responsible, Subscription, SubscriptionStatus, BillingCycle
+from app.models import User, Organization, Role, Responsible, Subscription, SubscriptionStatus, BillingCycle, Plan, WhatsAppConfirmation
 from app.core.security import create_email_token, create_password_reset_token, create_token, hash_password
 from app.core.subscriptions import subscription_access
 from app.subscription_reminders import run as run_subscription_reminders
+from app.automation_worker import run_once as run_whatsapp_automation
 client=TestClient(app)
 def setup_module(): Base.metadata.create_all(engine)
 def teardown_module(): Base.metadata.drop_all(engine)
@@ -75,6 +76,13 @@ def test_tenant_flow(monkeypatch):
     assert changed.status_code==200 and changed.json()["patient_response"]=="rescheduled" and changed.json()["duration_minutes"]==45
     record=client.post("/api/v1/records",json={"patient_id":patient.json()["id"],"visit_id":visit.json()["id"],"summary":"Paciente estável.","weight_kg":"72.5","blood_pressure_systolic":120,"blood_pressure_diastolic":80,"heart_rate_bpm":72,"temperature_c":"36.5","oxygen_saturation_percent":98},headers=headers)
     assert record.status_code==201 and record.json()["weight_kg"]=="72.50" and record.json()["oxygen_saturation_percent"]==98
+    ai_content={"summary":"Resumo revisável","attention_points":["Observar evolução"],"suggested_questions":["Houve mudanças?"],"next_actions":["Revisar orientações"],"safety_note":"Revisão profissional obrigatória."}
+    monkeypatch.setattr("app.api.generate_analysis",lambda kind,context:(ai_content,{"input_tokens":100,"output_tokens":50}))
+    preparation=client.post(f"/api/v1/visits/{visit.json()['id']}/ai-analysis",json={"analysis_type":"preparation"},headers=headers)
+    evolution=client.post(f"/api/v1/visits/{visit.json()['id']}/ai-analysis",json={"analysis_type":"evolution"},headers=headers)
+    assert preparation.status_code==200 and evolution.status_code==200
+    repeated=client.post(f"/api/v1/visits/{visit.json()['id']}/ai-analysis",json={"analysis_type":"preparation"},headers=headers)
+    assert repeated.json()["id"]==preparation.json()["id"]
     assert visit.status_code==201
     assert client.post(f"/api/v1/visits/{visit.json()['id']}/cancel",headers=headers).json()["status"]=="canceled"
     visit=client.post("/api/v1/visits",json={"patient_id":patient.json()["id"],"starts_at":datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(),"duration_minutes":60},headers=headers)
@@ -131,6 +139,16 @@ def test_tenant_flow(monkeypatch):
     canceled=client.post("/api/v1/billing/cancel",headers=headers)
     assert canceled.status_code==200 and canceled.json()["cancel_at_period_end"] is True
     assert client.get("/api/v1/billing/subscription",headers=headers).json()["cancel_at_period_end"] is True
+    with SessionLocal() as db:
+        premium=db.query(Plan).filter(Plan.code=="premium").first()
+        if not premium: premium=Plan(code="premium",name="Impacto Care Premium",monthly_price="79.90",annual_monthly_price="59.90",ai_daily_limit=20,whatsapp_monthly_limit=100);db.add(premium);db.flush()
+        item=db.get(Subscription,subscription_id);item.plan_id=premium.id;item.status=SubscriptionStatus.ACTIVE;item.cancel_at_period_end=False;db.commit()
+    future=client.post("/api/v1/visits",json={"patient_id":patient.json()["id"],"starts_at":(datetime.now(ZoneInfo("UTC"))+timedelta(hours=12)).isoformat(),"duration_minutes":60},headers=headers)
+    monkeypatch.setattr("app.automation_worker.configured",lambda:True);monkeypatch.setattr("app.automation_worker.send_confirmation",lambda *args:"wamid.test")
+    automation_now=datetime.now(ZoneInfo("UTC"))
+    assert run_whatsapp_automation(automation_now)>=1
+    assert run_whatsapp_automation(automation_now)==0
+    with SessionLocal() as db: assert db.query(WhatsAppConfirmation).filter(WhatsAppConfirmation.visit_id==future.json()["id"],WhatsAppConfirmation.status=="sent").count()==1
     period_end=client.get("/api/v1/billing/subscription",headers=headers).json()["current_period_end"]
     card_received={"id":"evt_test_card_received","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"billingType":"CREDIT_CARD","subscription":"sub_test_1"}}
     assert client.post("/api/v1/webhooks/asaas",json=card_received,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"}).status_code==200

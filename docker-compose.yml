@@ -18,6 +18,14 @@ services:
     depends_on:
       db: {condition: service_healthy}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+  automation:
+    build: ./backend
+    env_file: .env
+    depends_on:
+      db: {condition: service_healthy}
+      api: {condition: service_started}
+    restart: unless-stopped
+    command: python -m app.automation_worker
   web:
     build:
       context: ./frontend

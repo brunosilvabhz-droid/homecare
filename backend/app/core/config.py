@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     asaas_api_key: str | None = None
     asaas_checkout_url: str = "https://sandbox.asaas.com/checkoutSession/show"
     asaas_webhook_token: str | None = None
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-5-mini"
+    whatsapp_access_token: str | None = None
+    whatsapp_phone_number_id: str | None = None
+    whatsapp_api_version: str = "v23.0"
+    whatsapp_confirmation_template: str = "impacto_care_confirmacao_24h"
+    whatsapp_template_language: str = "pt_BR"
+    automation_interval_seconds: int = 300
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     @property
     def origins(self): return [x.strip() for x in self.cors_origins.split(",")]

@@ -80,3 +80,6 @@ class IntakeSubmit(BaseModel):
 class CheckoutCreate(BaseModel):
     billing_cycle:BillingCycle
     payment_method:Literal["credit_card","pix"]="credit_card"
+    plan_code:Literal["pro","premium"]="pro"
+class AIAnalysisCreate(BaseModel): analysis_type:Literal["preparation","evolution"]
+class AIAnalysisOut(Out): id:str;visit_id:str;analysis_type:str;content:dict;model:str;created_at:datetime
