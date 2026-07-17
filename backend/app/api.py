@@ -491,10 +491,32 @@ def report_summary(user:User=Depends(professional),db:Session=Depends(get_db)):
     org=user.organization_id
     by_status=db.execute(select(Visit.status,func.count()).where(Visit.organization_id==org).group_by(Visit.status)).all()
     return {"generated_at":datetime.now(timezone.utc),"visits_by_status":{str(k.value):v for k,v in by_status},"service_records":db.scalar(select(func.count()).select_from(ServiceRecord).where(ServiceRecord.organization_id==org)) or 0,"total_received":db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.paid.is_(True))) or 0}
+
+def ensure_subscription(db:Session,user:User)->Subscription:
+    """Backfill the trial subscription for accounts created before billing existed."""
+    item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
+    if item:
+        return item
+    plan=db.scalar(select(Plan).where(Plan.code=="pro"))
+    if not plan:
+        plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90"))
+        db.add(plan)
+        db.flush()
+    item=Subscription(
+        organization_id=user.organization_id,
+        plan_id=plan.id,
+        status=SubscriptionStatus.TRIAL,
+        billing_cycle=BillingCycle.MONTHLY,
+        current_period_end=(datetime.now(timezone.utc)+timedelta(days=platform_settings(db).trial_days)).date(),
+    )
+    db.add(item)
+    db.flush()
+    return item
+
 @router.get("/billing/subscription")
 def subscription(user:User=Depends(account_professional),db:Session=Depends(get_db)):
-    item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
-    if not item: raise HTTPException(404,"Assinatura não encontrada")
+    item=ensure_subscription(db,user)
+    db.commit()
     plan=db.get(Plan,item.plan_id)
     limit,used=ai_limit(db,user)
     return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"code":plan.code,"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price,"ai_daily_limit":limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit},"ai_used_today":used,"gateway":item.gateway,"cancel_at_period_end":item.cancel_at_period_end,"cancellation_requested_at":item.cancellation_requested_at,**subscription_access(item)}
@@ -503,8 +525,8 @@ def billing_plans(db:Session=Depends(get_db)):
     return [{"code":plan.code,"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"ai_daily_limit":plan.ai_daily_limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit} for plan in db.scalars(select(Plan).where(Plan.active.is_(True)).order_by(Plan.monthly_price)).all()]
 @router.post("/billing/checkout")
 def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional),db:Session=Depends(get_db)):
-    item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id)); plan=db.scalar(select(Plan).where(Plan.code==data.plan_code,Plan.active.is_(True)))
-    if not item or not plan: raise HTTPException(404,"Assinatura não encontrada")
+    item=ensure_subscription(db,user); plan=db.scalar(select(Plan).where(Plan.code==data.plan_code,Plan.active.is_(True)))
+    if not plan: raise HTTPException(404,"Plano não encontrado")
     first_due=item.current_period_end if item.status==SubscriptionStatus.TRIAL and item.current_period_end and item.current_period_end>datetime.now(timezone.utc).date() else datetime.now(timezone.utc).date()
     annual=data.billing_cycle==BillingCycle.ANNUAL; value=Decimal(plan.annual_monthly_price)*12 if annual else Decimal(plan.monthly_price); cycle="YEARLY" if annual else "MONTHLY"
     billing_type="PIX" if data.payment_method=="pix" else "CREDIT_CARD"
