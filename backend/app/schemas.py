@@ -5,6 +5,23 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 from app.models import Role, VisitStatus, BillingCycle
 class Out(BaseModel): model_config=ConfigDict(from_attributes=True)
 PROFESSIONS={"nurse","nursing_technician","caregiver","physiotherapist","occupational_therapist","speech_therapist","nutritionist","psychologist","social_worker","physician","dentist","other"}
+def cpf_digits(value:str)->str:
+    digits="".join(filter(str.isdigit,value))
+    if len(digits)!=11 or len(set(digits))==1: raise ValueError("CPF inválido")
+    def check_digit(base:str)->str:
+        total=sum(int(number)*weight for number,weight in zip(base,range(len(base)+1,1,-1)))
+        result=11-total%11
+        return "0" if result>=10 else str(result)
+    if digits[-2:]!=check_digit(digits[:9])+check_digit(digits[:10]): raise ValueError("CPF inválido")
+    return digits
+def brazilian_phone(value:str,mobile_only:bool=False)->str:
+    digits="".join(filter(str.isdigit,value))
+    if digits.startswith("55") and len(digits) in (12,13): digits=digits[2:]
+    valid_length=len(digits)==11 if mobile_only else len(digits) in (10,11)
+    valid_ddd=len(digits)>=2 and digits[:2] not in {"00","01","02","03","04","05","06","07","08","09"}
+    valid_number=not mobile_only or (len(digits)==11 and digits[2]=="9")
+    if not valid_length or not valid_ddd or not valid_number: raise ValueError("Informe um celular válido com DDD")
+    return digits
 class Register(BaseModel):
     name:str=Field(min_length=3,max_length=120); email:EmailStr; password:str=Field(min_length=8,max_length=128); organization_name:str=Field(min_length=2,max_length=120); phone:str=Field(min_length=10,max_length=30); cpf:str=Field(min_length=11,max_length=14); profession:str; profession_other:str|None=None; council_name:str|None=None; council_code:str|None=None; council_state:str|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str=Field(min_length=2,max_length=100); state:str=Field(min_length=2,max_length=2); accept_lgpd:bool
     @field_validator("profession")
@@ -27,6 +44,9 @@ class Register(BaseModel):
     def other_required(self):
         if self.profession=="other" and not self.profession_other: raise ValueError("Informe a profissão")
         return self
+    @field_validator("phone")
+    @classmethod
+    def valid_phone(cls,value): return brazilian_phone(value,True)
 class Login(BaseModel): email:EmailStr; password:str; captcha_token:str|None=None
 class Token(BaseModel): access_token:str; token_type:str="bearer"
 class Message(BaseModel): message:str
@@ -38,13 +58,34 @@ class EmailAction(BaseModel): email:EmailStr
 class PasswordReset(BaseModel): token:str; password:str=Field(min_length=8,max_length=128)
 class GoogleAuth(BaseModel):
     credential:str; organization_name:str|None=None; phone:str|None=None; cpf:str|None=None; profession:str|None=None; profession_other:str|None=None; council_name:str|None=None; council_code:str|None=None; council_state:str|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; accept_lgpd:bool=False
+    @field_validator("cpf")
+    @classmethod
+    def valid_cpf(cls,value): return cpf_digits(value) if value else value
+    @field_validator("phone")
+    @classmethod
+    def valid_phone(cls,value): return brazilian_phone(value,True) if value else value
 class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None; default_session_duration_minutes:int; professional_summary:str|None; specialties:str|None; education:str|None; experience_years:int|None; service_areas:str|None; professional_approach:str|None; signature_name:str|None; signature_council:str|None; signature_profession:str|None
 class ProfessionalProfileUpdate(BaseModel): professional_summary:str|None=Field(default=None,max_length=2000); specialties:str|None=Field(default=None,max_length=1000); education:str|None=Field(default=None,max_length=1500); experience_years:int|None=Field(default=None,ge=0,le=80); service_areas:str|None=Field(default=None,max_length=1000); professional_approach:str|None=Field(default=None,max_length=1500)
-class ResponsibleCreate(BaseModel): name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
-class PatientIn(BaseModel): name:str; status:str="active"; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; care_needs:str|None=None; mobility:str|None=None; session_value:Decimal|None=Field(default=None,ge=0); session_count:int|None=Field(default=None,ge=1,le=365); notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
+class ResponsibleCreate(BaseModel):
+    name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
+    @field_validator("phone")
+    @classmethod
+    def valid_phone(cls,value): return brazilian_phone(value) if value else value
+class PatientIn(BaseModel):
+    name:str; status:str="active"; cpf:str|None=None; birth_date:date|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; latitude:float|None=None; longitude:float|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; care_needs:str|None=None; mobility:str|None=None; session_value:Decimal|None=Field(default=None,ge=0); session_count:int|None=Field(default=None,ge=1,le=365); notes:str|None=None; family_user_id:str|None=None; responsible:ResponsibleCreate|None=None
+    @field_validator("cpf")
+    @classmethod
+    def valid_cpf(cls,value): return cpf_digits(value) if value else value
+    @field_validator("phone")
+    @classmethod
+    def valid_phone(cls,value): return brazilian_phone(value) if value else value
 class PatientOut(PatientIn, Out): id:str; organization_id:str; created_at:datetime
 class PatientPortalInvite(BaseModel): name:str=Field(min_length=3,max_length=120); email:EmailStr
-class ResponsibleIn(BaseModel): patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
+class ResponsibleIn(BaseModel):
+    patient_id:str; name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
+    @field_validator("phone")
+    @classmethod
+    def valid_phone(cls,value): return brazilian_phone(value) if value else value
 class ResponsibleOut(ResponsibleIn, Out): id:str; portal_user_id:str|None=None
 class VisitIn(BaseModel): patient_id:str; starts_at:datetime; duration_minutes:int=60; notes:str|None=None
 class VisitOut(Out): id:str; patient_id:str; professional_id:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; notes:str|None; confirmation_manual_sent_at:datetime|None; confirmation_automatic_sent_at:datetime|None; patient_response:str|None; patient_responded_at:datetime|None; patient:PatientOut
@@ -76,9 +117,22 @@ class RouteCalculate(BaseModel):
     def route_cost_source(self):
         if not self.vehicle_id and (self.average_km_per_liter is None or self.fuel_price is None): raise ValueError("Informe consumo e preço do combustível")
         return self
-class IntakeLinkCreate(BaseModel): expires_in_days:int=Field(default=7,ge=1,le=30); recipient_name:str|None=Field(default=None,min_length=2,max_length=120); recipient_phone:str|None=Field(default=None,min_length=8,max_length=30)
+class IntakeLinkCreate(BaseModel):
+    expires_in_days:int=Field(default=7,ge=1,le=30); recipient_name:str|None=Field(default=None,min_length=2,max_length=120); recipient_phone:str|None=Field(default=None,min_length=8,max_length=30)
+    @field_validator("recipient_phone")
+    @classmethod
+    def valid_phone(cls,value): return brazilian_phone(value,True) if value else value
 class IntakeSubmit(BaseModel):
     patient_name:str=Field(min_length=3,max_length=120); birth_date:date|None=None; cpf:str|None=None; gender:str|None=None; phone:str|None=None; email:EmailStr|None=None; postal_code:str|None=None; address:str|None=None; address_number:str|None=None; address_complement:str|None=None; neighborhood:str|None=None; city:str|None=None; state:str|None=None; conditions:str|None=None; medications:str|None=None; allergies:str|None=None; needs:str|None=None; mobility:str|None=None; additional_information:str|None=None; responsible_name:str=Field(min_length=3,max_length=120); responsible_relationship:str; responsible_phone:str; responsible_email:EmailStr|None=None; accept_privacy:bool
+    @field_validator("cpf")
+    @classmethod
+    def valid_cpf(cls,value): return cpf_digits(value) if value else value
+    @field_validator("phone")
+    @classmethod
+    def valid_patient_phone(cls,value): return brazilian_phone(value) if value else value
+    @field_validator("responsible_phone")
+    @classmethod
+    def valid_responsible_phone(cls,value): return brazilian_phone(value,True)
 class CheckoutCreate(BaseModel):
     billing_cycle:BillingCycle
     payment_method:Literal["credit_card","pix"]="credit_card"

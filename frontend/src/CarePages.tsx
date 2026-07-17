@@ -4,9 +4,10 @@ import {CalendarDays,MessageCircle,Pencil,Plus,Users,XCircle} from 'lucide-react
 import {api,patch,post} from './api';
 import {states} from './formOptions';
 import type {Patient,Visit} from './types';
+import {configureBrazilianInput,validCpf,validPhone} from './brValidation';
 
 const val=(form:FormData,name:string)=>String(form.get(name)||'').trim()||null;
-const Field=({name,label,type='text',required=false,value,onBlur}:{name:string;label:string;type?:string;required?:boolean;value?:string|number;onBlur?:(e:React.FocusEvent<HTMLInputElement>)=>void})=><label className="block"><span className="label">{label}</span><input key={String(value??'')} className="input" name={name} type={type} required={required} defaultValue={value} onBlur={onBlur}/></label>;
+const Field=({name,label,type='text',required=false,value,onBlur}:{name:string;label:string;type?:string;required?:boolean;value?:string|number;onBlur?:(e:React.FocusEvent<HTMLInputElement>)=>void})=><label className="block"><span className="label">{label}</span><input key={String(value??'')} className="input" name={name} type={type} required={required} defaultValue={value} onInput={event=>configureBrazilianInput(event.currentTarget,name)} onBlur={event=>{if(name==='cpf'&&event.currentTarget.value&&!validCpf(event.currentTarget.value))event.currentTarget.setCustomValidity('Informe um CPF válido');else if(name.includes('phone')&&event.currentTarget.value&&!validPhone(event.currentTarget.value))event.currentTarget.setCustomValidity('Informe o telefone com DDD');else event.currentTarget.setCustomValidity('');onBlur?.(event)}}/></label>;
 const Text=({name,label,value}:{name:string;label:string;value?:string})=><label className="block"><span className="label">{label}</span><textarea className="input min-h-28" name={name} defaultValue={value}/></label>;
 async function cep(value:string){const digits=value.replace(/\D/g,'');if(digits.length!==8)return null;const r=await fetch(`https://viacep.com.br/ws/${digits}/json/`);const data=await r.json();return data.erro?null:data}
 

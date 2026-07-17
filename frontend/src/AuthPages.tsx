@@ -3,10 +3,11 @@ import {ArrowLeft,HeartHandshake,Mail} from 'lucide-react';
 import {useNavigate,useSearchParams} from 'react-router-dom';
 import {api,post} from './api';
 import {professionCouncil,professions,states} from './formOptions';
+import {configureBrazilianInput,validCpf,validPhone} from './brValidation';
 
 const value=(form:FormData,name:string)=>String(form.get(name)||'').trim()||null;
 type InputProps={name:string;label:string;type?:string;required?:boolean;minLength?:number;defaultValue?:string;readOnly?:boolean;onBlur?:(event:React.FocusEvent<HTMLInputElement>)=>void};
-const Input=({name,label,type='text',required=false,minLength,defaultValue,readOnly,onBlur}:InputProps)=><label className="block"><span className="label">{label}</span><input key={`${name}-${defaultValue||''}`} className={`input ${readOnly?'bg-ink/5':''}`} name={name} type={type} required={required} minLength={minLength} defaultValue={defaultValue} readOnly={readOnly} onBlur={onBlur}/></label>;
+const Input=({name,label,type='text',required=false,minLength,defaultValue,readOnly,onBlur}:InputProps)=><label className="block"><span className="label">{label}</span><input key={`${name}-${defaultValue||''}`} className={`input ${readOnly?'bg-ink/5':''}`} name={name} type={type} required={required} minLength={minLength} defaultValue={defaultValue} readOnly={readOnly} onInput={event=>configureBrazilianInput(event.currentTarget,name)} onBlur={event=>{if(name==='cpf'&&event.currentTarget.value&&!validCpf(event.currentTarget.value))event.currentTarget.setCustomValidity('Informe um CPF válido');else if(name==='phone'&&event.currentTarget.value&&!validPhone(event.currentTarget.value,true))event.currentTarget.setCustomValidity('Informe um celular válido com DDD');else event.currentTarget.setCustomValidity('');onBlur?.(event)}}/></label>;
 type GoogleCredential={credential:string};
 type GoogleProfile={name?:string;email?:string};
 type TurnstileApi={render:(element:HTMLElement,options:Record<string,unknown>)=>string;reset:(widgetId?:string)=>void;remove:(widgetId:string)=>void};
