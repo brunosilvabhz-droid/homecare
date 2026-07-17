@@ -56,7 +56,7 @@ def sync_patient_finance(db:Session,patient:Patient):
 @router.get("/auth/config")
 def auth_config(db:Session=Depends(get_db)):
     operational=platform_settings(db)
-    return {"google_client_id":settings.google_client_id if operational.google_login_enabled else None,"google_enabled":bool(settings.google_client_id and operational.google_login_enabled)}
+    return {"google_client_id":settings.google_oauth_client_id if operational.google_login_enabled else None,"google_enabled":bool(settings.google_oauth_client_id and operational.google_login_enabled)}
 @router.post("/auth/register",response_model=Message,status_code=201)
 def register(data:Register,db:Session=Depends(get_db)):
     operational=platform_settings(db)
@@ -99,10 +99,10 @@ def login(data:Login,request:Request,db:Session=Depends(get_db)):
 def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
     operational=platform_settings(db)
     if not operational.google_login_enabled: raise HTTPException(503,"Login com Google temporariamente desativado")
-    if not settings.google_client_id:
+    if not settings.google_oauth_client_id:
         raise HTTPException(503,"Login com Google ainda não está configurado")
     try:
-        identity=google_id_token.verify_oauth2_token(data.credential,google_requests.Request(),settings.google_client_id)
+        identity=google_id_token.verify_oauth2_token(data.credential,google_requests.Request(),settings.google_oauth_client_id)
     except Exception:
         raise HTTPException(401,"Credencial do Google inválida")
     if not identity.get("email_verified"):
@@ -459,7 +459,7 @@ def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
 @router.get("/admin/settings")
 def admin_get_settings(user:User=Depends(admin),db:Session=Depends(get_db)):
     plan=db.scalar(select(Plan).where(Plan.code=="pro"))
-    return {"settings":platform_settings(db).model_dump(mode="json"),"plan":{"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"active":plan.active} if plan else None,"integrations":{"smtp":bool(settings.smtp_host and settings.smtp_username),"google":bool(settings.google_client_id),"turnstile":bool(settings.turnstile_secret_key),"asaas":bool(settings.asaas_api_key),"asaas_webhook":bool(settings.asaas_webhook_token),"maps":bool(settings.geocoder_url and settings.routing_url)},"environment":{"frontend_url":settings.frontend_url,"asaas_environment":"produção" if "sandbox" not in settings.asaas_api_url else "homologação"}}
+    return {"settings":platform_settings(db).model_dump(mode="json"),"plan":{"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"active":plan.active} if plan else None,"integrations":{"smtp":bool(settings.smtp_host and settings.smtp_username),"google":bool(settings.google_oauth_client_id),"turnstile":bool(settings.turnstile_secret_key),"asaas":bool(settings.asaas_api_key),"asaas_webhook":bool(settings.asaas_webhook_token),"maps":bool(settings.geocoder_url and settings.routing_url)},"environment":{"frontend_url":settings.frontend_url,"asaas_environment":"produção" if "sandbox" not in settings.asaas_api_url else "homologação"}}
 @router.put("/admin/settings",response_model=AdminSettings)
 def admin_save_settings(data:AdminSettings,user:User=Depends(admin),db:Session=Depends(get_db)):
     item=db.scalar(select(SystemSetting).where(SystemSetting.key==ADMIN_SETTINGS_KEY))

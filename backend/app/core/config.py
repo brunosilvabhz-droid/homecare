@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -29,6 +30,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     @property
     def origins(self): return [x.strip() for x in self.cors_origins.split(",")]
+    @property
+    def google_oauth_client_id(self): return self.google_client_id or os.getenv("VITE_GOOGLE_CLIENT_ID")
 
 @lru_cache
 def get_settings(): return Settings()
