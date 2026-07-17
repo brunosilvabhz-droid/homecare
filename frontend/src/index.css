@@ -44,7 +44,7 @@ p { line-height: 1.55; }
   box-shadow: 0 7px 18px rgba(22, 136, 109, .18);
 }
 .btn-primary:hover { transform: translateY(-1px); }
-.btn-outline { @apply btn border border-ink/20 bg-white hover:border-brand hover:text-brand; }
+.btn-outline { @apply btn border bg-white hover:border-brand hover:text-brand; border-color: #bdcbc7; }
 .btn-outline:hover { background: #fbfefd; }
 
 .card {
