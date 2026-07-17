@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.email import send_relationship_email
 from app.core.config import settings
 from app.core.subscriptions import subscription_access
+from app.core.whatsapp import configured as whatsapp_configured, send_trial_expiration
 from app.models import AIAnalysis, CommunicationAutomation, CommunicationLog, FinanceEntry, Patient, Role, ServiceRecord, Subscription, SubscriptionStatus, User, Visit
 
 log=logging.getLogger("impactocare.relationship");LOCAL_TZ=ZoneInfo("America/Sao_Paulo")
@@ -76,5 +77,13 @@ def run_once(now:datetime|None=None)->int:
                     ok=send_relationship_email(user.email,item.subject or item.name,content,item.name,f"{settings.frontend_url.rstrip('/')}{item.action_path or '/app'}");entry.status="sent" if ok else "failed";entry.sent_at=now if ok else None;entry.error_message=None if ok else "SMTP não configurado";sent+=int(ok)
                 except Exception as error:entry.status="failed";entry.error_message=str(error)[:1000];log.exception("Falha na automação %s",item.code)
                 db.commit()
+            remaining=(subscription.current_period_end-now.date()).days if subscription.current_period_end else None
+            if remaining==7 and user.whatsapp_allowed and user.phone and whatsapp_configured() and local.time()>=time(9):
+                key=f"{user.id}:{subscription.id}:trial_7:whatsapp";entry=db.scalar(select(CommunicationLog).where(CommunicationLog.idempotency_key==key))
+                if not entry:
+                    entry=CommunicationLog(organization_id=user.organization_id,user_id=user.id,channel="whatsapp",template_code="trial_7",idempotency_key=key,scheduled_at=now,status="processing",attempts=1,attempted_at=now);db.add(entry)
+                    try:entry.provider_id=send_trial_expiration(user.phone,user.name.split()[0],f"{settings.frontend_url.rstrip('/')}/app/billing");entry.status="sent";entry.sent_at=now;sent+=1
+                    except Exception as error:entry.status="failed";entry.error_message=str(error)[:1000];log.exception("Falha no WhatsApp de conversão")
+                    db.commit()
         db.commit()
     return sent

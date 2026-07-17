@@ -12,3 +12,8 @@ def send_confirmation(phone:str,patient_name:str,date_text:str,time_text:str,url
     payload={"messaging_product":"whatsapp","to":normalize_phone(phone),"type":"template","template":{"name":settings.whatsapp_confirmation_template,"language":{"code":settings.whatsapp_template_language},"components":[{"type":"body","parameters":parameters}]}}
     response=httpx.post(f"https://graph.facebook.com/{settings.whatsapp_api_version}/{settings.whatsapp_phone_number_id}/messages",json=payload,headers={"Authorization":f"Bearer {settings.whatsapp_access_token}"},timeout=30)
     response.raise_for_status();return response.json()["messages"][0]["id"]
+def send_trial_expiration(phone:str,first_name:str,plans_url:str)->str:
+    if not configured():raise RuntimeError("WhatsApp Business não configurado")
+    parameters=[{"type":"text","text":first_name},{"type":"text","text":plans_url}]
+    payload={"messaging_product":"whatsapp","to":normalize_phone(phone),"type":"template","template":{"name":settings.whatsapp_trial_expiration_template,"language":{"code":settings.whatsapp_template_language},"components":[{"type":"body","parameters":parameters}]}}
+    response=httpx.post(f"https://graph.facebook.com/{settings.whatsapp_api_version}/{settings.whatsapp_phone_number_id}/messages",json=payload,headers={"Authorization":f"Bearer {settings.whatsapp_access_token}"},timeout=30);response.raise_for_status();return response.json()["messages"][0]["id"]

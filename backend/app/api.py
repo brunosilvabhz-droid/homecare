@@ -24,7 +24,7 @@ from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
 from app.core.ai import generate_analysis
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog, ContextMessageInteraction, ExitSurveyResponse
 from app.relationship_automation import ensure_templates
 from app.onboarding import event as product_event, status as onboarding_status
 from app.schemas import *
@@ -171,6 +171,22 @@ def me(user:User=Depends(current_user)): return user
 @router.get("/onboarding",response_model=OnboardingStatus)
 def onboarding(user:User=Depends(professional),db:Session=Depends(get_db)):
     result=onboarding_status(db,user);db.commit();return result
+@router.get("/context-messages")
+def context_messages(user:User=Depends(professional),db:Session=Depends(get_db)):
+    progress=onboarding_status(db,user);next_action=progress.get("next_action")
+    if not next_action:return []
+    code=f"next_{next_action['code']}";interaction=db.scalar(select(ContextMessageInteraction).where(ContextMessageInteraction.user_id==user.id,ContextMessageInteraction.message_code==code))
+    if interaction and (interaction.dismissed_at or interaction.views>=3):return []
+    return [{"code":code,"title":"Próximo passo recomendado","message":next_action["benefit"],"action_label":next_action["title"],"action_path":next_action["action_path"]}]
+@router.post("/context-messages/{message_code}")
+def context_message_interaction(message_code:str,data:ContextInteractionIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+    item=db.scalar(select(ContextMessageInteraction).where(ContextMessageInteraction.user_id==user.id,ContextMessageInteraction.message_code==message_code))
+    if not item:item=ContextMessageInteraction(organization_id=user.organization_id,user_id=user.id,message_code=message_code);db.add(item)
+    moment=datetime.now(timezone.utc)
+    if data.action=="view":item.views+=1;item.last_viewed_at=moment
+    elif data.action=="click":item.clicked_at=moment
+    else:item.dismissed_at=moment
+    db.commit();return {"updated":True}
 @router.get("/me/communications",response_model=CommunicationPreferences)
 def communication_preferences(user:User=Depends(current_user)):
     return CommunicationPreferences(email_operational=user.email_operational,email_guidance=user.email_guidance,email_billing=user.email_billing,email_marketing=user.email_marketing,whatsapp_allowed=user.whatsapp_allowed)
@@ -178,6 +194,13 @@ def communication_preferences(user:User=Depends(current_user)):
 def update_communication_preferences(data:CommunicationPreferences,user:User=Depends(current_user),db:Session=Depends(get_db)):
     for key,value in data.model_dump().items(): setattr(user,key,value)
     user.communication_consent_at=datetime.now(timezone.utc);user.communication_consent_source="settings";user.communication_consent_version="1.0";db.commit();return data
+@router.post("/exit-survey",status_code=201)
+def exit_survey(data:ExitSurveyIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    subscription=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
+    if not subscription:raise HTTPException(404,"Assinatura não encontrada")
+    existing=db.scalar(select(ExitSurveyResponse).where(ExitSurveyResponse.user_id==user.id,ExitSurveyResponse.subscription_id==subscription.id))
+    if existing:raise HTTPException(409,"Pesquisa já respondida")
+    db.add(ExitSurveyResponse(organization_id=user.organization_id,user_id=user.id,subscription_id=subscription.id,reason=data.reason,details=data.details));product_event(db,user,"exit_survey_answered");db.commit();return {"message":"Obrigado. Sua resposta ajudará a melhorar a Impacto Care."}
 @router.put("/me/professional-profile",response_model=UserOut)
 def update_professional_profile(data:ProfessionalProfileUpdate,user:User=Depends(professional),db:Session=Depends(get_db)):
     for key,value in data.model_dump().items(): setattr(user,key,value)
@@ -585,6 +608,9 @@ def admin_relationship_metrics(user:User=Depends(admin),db:Session=Depends(get_d
     by_profession=[{"label":label or "Não informado","registered":count} for label,count in db.execute(select(User.profession,func.count()).where(User.role==Role.PROFESSIONAL).group_by(User.profession)).all()]
     by_source=[{"label":label or "Não informado","registered":count} for label,count in db.execute(select(User.registration_source,func.count()).where(User.role==Role.PROFESSIONAL).group_by(User.registration_source)).all()]
     return {"registered":total,"email_confirmed":confirmed,"activated":activated,"paid":paid,"activation_rate":round(activated/total*100,1) if total else 0,"conversion_rate":round(paid/total*100,1) if total else 0,"average_activation_days":round(float(avg_days),1) if avg_days is not None else None,"messages_sent":db.scalar(select(func.count()).select_from(CommunicationLog).where(CommunicationLog.status=="sent")) or 0,"message_failures":db.scalar(select(func.count()).select_from(CommunicationLog).where(CommunicationLog.status=="failed")) or 0,"by_profession":by_profession,"by_source":by_source}
+@router.get("/admin/relationship/exit-surveys")
+def admin_exit_surveys(user:User=Depends(admin),db:Session=Depends(get_db)):
+    rows=db.execute(select(ExitSurveyResponse.reason,func.count()).group_by(ExitSurveyResponse.reason)).all();return [{"reason":reason,"count":count} for reason,count in rows]
 @router.get("/admin/settings")
 def admin_get_settings(user:User=Depends(admin),db:Session=Depends(get_db)):
     plan=db.scalar(select(Plan).where(Plan.code=="pro"))

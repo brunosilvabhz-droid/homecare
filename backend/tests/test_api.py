@@ -87,6 +87,11 @@ def test_tenant_flow(monkeypatch):
     assert next(step for step in onboarding.json()["steps"] if step["code"]=="patient")["completed"] is True
     preferences=client.put("/api/v1/me/communications",json={"email_operational":True,"email_guidance":True,"email_billing":True,"email_marketing":False,"whatsapp_allowed":True},headers=headers)
     assert preferences.status_code==200 and preferences.json()["whatsapp_allowed"] is True
+    messages=client.get("/api/v1/context-messages",headers=headers)
+    assert messages.status_code==200 and messages.json()
+    message_code=messages.json()[0]["code"]
+    assert client.post(f"/api/v1/context-messages/{message_code}",json={"action":"dismiss"},headers=headers).status_code==200
+    assert client.get("/api/v1/context-messages",headers=headers).json()==[]
     ai_content={"summary":"Resumo revisável","attention_points":["Observar evolução"],"suggested_questions":["Houve mudanças?"],"next_actions":["Revisar orientações"],"safety_note":"Revisão profissional obrigatória."}
     monkeypatch.setattr("app.api.generate_analysis",lambda kind,context:(ai_content,{"input_tokens":100,"output_tokens":50}))
     preparation=client.post(f"/api/v1/visits/{visit.json()['id']}/ai-analysis",json={"analysis_type":"preparation"},headers=headers)
@@ -124,6 +129,8 @@ def test_tenant_flow(monkeypatch):
     assert next(x for x in patients if x["id"]==inactive_id)["status"]=="inactive"
     assert client.post(f"/api/v1/patients/{inactive_id}/activate",headers=headers).status_code==200
     subscription_id=client.get("/api/v1/billing/subscription",headers=headers).json()["id"]
+    survey=client.post("/api/v1/exit-survey",json={"reason":"no_time","details":"Ainda estou avaliando a rotina."},headers=headers)
+    assert survey.status_code==201
     checkout_payloads=[]
     monkeypatch.setattr("app.api.create_asaas_checkout",lambda payload:checkout_payloads.append(payload) or {"id":"checkout_test_123"})
     checkout=client.post("/api/v1/billing/checkout",json={"billing_cycle":"annual"},headers=headers)

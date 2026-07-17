@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str | None = None
     whatsapp_api_version: str = "v23.0"
     whatsapp_confirmation_template: str = "impacto_care_confirmacao_24h"
+    whatsapp_trial_expiration_template: str = "impacto_care_teste_7_dias"
     whatsapp_template_language: str = "pt_BR"
     automation_interval_seconds: int = 300
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
