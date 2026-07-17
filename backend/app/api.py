@@ -24,7 +24,8 @@ from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
 from app.core.ai import generate_analysis
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent
+from app.onboarding import event as product_event, status as onboarding_status
 from app.schemas import *
 router=APIRouter()
 ADMIN_SETTINGS_KEY="platform"
@@ -77,7 +78,7 @@ def register(data:Register,db:Session=Depends(get_db)):
     profile=data.model_dump(exclude={"organization_name","password","accept_lgpd"})
     profile["email"]=str(data.email).lower(); profile["state"]=data.state.upper()
     if profile.get("council_state"): profile["council_state"]=profile["council_state"].upper()
-    user=User(**profile,password_hash=hash_password(data.password),role=Role.PROFESSIONAL,organization_id=org.id)
+    user=User(**profile,password_hash=hash_password(data.password),role=Role.PROFESSIONAL,organization_id=org.id,registration_source="password")
     db.add(user); plan=db.scalar(select(Plan).where(Plan.code=="pro"))
     if not plan:
         plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
@@ -88,7 +89,7 @@ def register(data:Register,db:Session=Depends(get_db)):
 def verify_email(token:str,db:Session=Depends(get_db)):
     user_id=decode_email_token(token); user=db.get(User,user_id) if user_id else None
     if not user: raise HTTPException(400,"Link de confirmação inválido ou expirado")
-    if user.email_verified_at is None: user.email_verified_at=datetime.now(timezone.utc); db.commit()
+    if user.email_verified_at is None: user.email_verified_at=datetime.now(timezone.utc); product_event(db,user,"email_confirmed","email"); db.commit()
     return Message(message="E-mail confirmado com sucesso. Você já pode entrar.")
 @router.post("/auth/resend-verification",response_model=Message)
 def resend_verification(data:EmailAction,db:Session=Depends(get_db)):
@@ -103,7 +104,9 @@ def login(data:Login,request:Request,db:Session=Depends(get_db)):
     user=db.scalar(select(User).where(User.email==data.email.lower()))
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"E-mail ou senha inválidos")
     if user.email_verified_at is None: raise HTTPException(403,"Confirme seu e-mail antes de entrar")
-    user.last_login_at=datetime.now(timezone.utc); db.commit()
+    user.last_login_at=datetime.now(timezone.utc)
+    if not user.first_access_at: user.first_access_at=user.last_login_at; product_event(db,user,"first_login","password")
+    db.commit()
     return Token(access_token=create_token(user.id))
 @router.post("/auth/google",response_model=Token)
 def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
@@ -137,7 +140,7 @@ def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
             profile=data.model_dump(exclude={"credential","organization_name","accept_lgpd"})
             profile["state"]=str(data.state).upper()
             if profile.get("council_state"): profile["council_state"]=str(profile["council_state"]).upper()
-            user=User(**profile,name=str(identity.get("name") or email.split("@")[0]),email=email,password_hash=hash_password(secrets.token_urlsafe(48)),email_verified_at=datetime.now(timezone.utc),role=Role.PROFESSIONAL,organization_id=org.id)
+            user=User(**profile,name=str(identity.get("name") or email.split("@")[0]),email=email,password_hash=hash_password(secrets.token_urlsafe(48)),email_verified_at=datetime.now(timezone.utc),role=Role.PROFESSIONAL,organization_id=org.id,registration_source="google")
             db.add(user); db.flush(); db.add(GoogleIdentity(user_id=user.id,subject=subject))
             plan=db.scalar(select(Plan).where(Plan.code=="pro"))
             if not plan:
@@ -145,6 +148,7 @@ def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
             db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=operational.trial_days)).date()))
     if not user.is_active: raise HTTPException(403,"Conta desativada")
     user.last_login_at=datetime.now(timezone.utc)
+    if not user.first_access_at: user.first_access_at=user.last_login_at; product_event(db,user,"first_login","google")
     db.commit()
     return Token(access_token=create_token(user.id))
 
@@ -163,9 +167,20 @@ def reset_password(data:PasswordReset,db:Session=Depends(get_db)):
     return Message(message="Senha redefinida com sucesso.")
 @router.get("/me",response_model=UserOut)
 def me(user:User=Depends(current_user)): return user
+@router.get("/onboarding",response_model=OnboardingStatus)
+def onboarding(user:User=Depends(professional),db:Session=Depends(get_db)):
+    result=onboarding_status(db,user);db.commit();return result
+@router.get("/me/communications",response_model=CommunicationPreferences)
+def communication_preferences(user:User=Depends(current_user)):
+    return CommunicationPreferences(email_operational=user.email_operational,email_guidance=user.email_guidance,email_billing=user.email_billing,email_marketing=user.email_marketing,whatsapp_allowed=user.whatsapp_allowed)
+@router.put("/me/communications",response_model=CommunicationPreferences)
+def update_communication_preferences(data:CommunicationPreferences,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    for key,value in data.model_dump().items(): setattr(user,key,value)
+    user.communication_consent_at=datetime.now(timezone.utc);user.communication_consent_source="settings";user.communication_consent_version="1.0";db.commit();return data
 @router.put("/me/professional-profile",response_model=UserOut)
 def update_professional_profile(data:ProfessionalProfileUpdate,user:User=Depends(professional),db:Session=Depends(get_db)):
     for key,value in data.model_dump().items(): setattr(user,key,value)
+    if user.professional_summary and user.profession and user.phone: product_event(db,user,"profile_completed")
     audit(db,user,"update","professional_profile");db.commit();db.refresh(user);return user
 @router.put("/me/profile-photo",response_model=Message)
 def profile_photo(data:ProfilePhotoIn,user:User=Depends(professional),db:Session=Depends(get_db)):

@@ -80,6 +80,12 @@ def test_tenant_flow(monkeypatch):
     assert changed.status_code==200 and changed.json()["patient_response"]=="rescheduled" and changed.json()["duration_minutes"]==45
     record=client.post("/api/v1/records",json={"patient_id":patient.json()["id"],"visit_id":visit.json()["id"],"summary":"Paciente estável.","weight_kg":"72.5","blood_pressure_systolic":120,"blood_pressure_diastolic":80,"heart_rate_bpm":72,"temperature_c":"36.5","oxygen_saturation_percent":98},headers=headers)
     assert record.status_code==201 and record.json()["weight_kg"]=="72.50" and record.json()["oxygen_saturation_percent"]==98
+    onboarding=client.get("/api/v1/onboarding",headers=headers)
+    assert onboarding.status_code==200 and onboarding.json()["activated"] is True
+    assert onboarding.json()["completed_steps"]>=5 and onboarding.json()["progress"]>=50
+    assert next(step for step in onboarding.json()["steps"] if step["code"]=="patient")["completed"] is True
+    preferences=client.put("/api/v1/me/communications",json={"email_operational":True,"email_guidance":True,"email_billing":True,"email_marketing":False,"whatsapp_allowed":True},headers=headers)
+    assert preferences.status_code==200 and preferences.json()["whatsapp_allowed"] is True
     ai_content={"summary":"Resumo revisável","attention_points":["Observar evolução"],"suggested_questions":["Houve mudanças?"],"next_actions":["Revisar orientações"],"safety_note":"Revisão profissional obrigatória."}
     monkeypatch.setattr("app.api.generate_analysis",lambda kind,context:(ai_content,{"input_tokens":100,"output_tokens":50}))
     preparation=client.post(f"/api/v1/visits/{visit.json()['id']}/ai-analysis",json={"analysis_type":"preparation"},headers=headers)

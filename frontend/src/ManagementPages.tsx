@@ -4,9 +4,10 @@ import {Activity,CalendarDays,CircleDollarSign,Settings2,Users} from 'lucide-rea
 import type {LucideIcon} from 'lucide-react';
 import {api,patch,post} from './api';
 import type {Finance,Patient,User} from './types';
+import OnboardingPanel from './OnboardingPanel';
 
 const money=(value?:string|number)=>Number(value||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-function Header({title,sub,action}:{title:string;sub:string;action?:React.ReactNode}){return <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl">{title}</h1><p className="mt-1 text-ink/55">{sub}</p></div>{action}</div>}
+function Header({title,sub,action}:{title:string;sub:string;action?:React.ReactNode}){return <>{title==='Visão geral'&&<OnboardingPanel/>}<div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl">{title}</h1><p className="mt-1 text-ink/55">{sub}</p></div>{action}</div></>}
 
 type AdminUser={id:string;name:string;email:string;organization:string;role:string;profession?:string;is_active:boolean;email_verified:boolean;access_status:string;last_login_at?:string;created_at:string;plan_name?:string;plan_status?:string;billing_cycle?:string;plan_ends_at?:string;days_remaining?:number;complimentary_until?:string;complimentary_note?:string};
 export function AdminUsersPage(){
