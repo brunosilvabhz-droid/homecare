@@ -18,9 +18,13 @@ from app.core.config import settings
 from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout
 from app.core.subscriptions import subscription_access
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting
 from app.schemas import *
 router=APIRouter()
+ADMIN_SETTINGS_KEY="platform"
+def platform_settings(db:Session)->AdminSettings:
+    item=db.scalar(select(SystemSetting).where(SystemSetting.key==ADMIN_SETTINGS_KEY))
+    return AdminSettings.model_validate(item.value if item else {})
 def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organization_id,user_id=user.id,action=action,resource=resource))
 def owned(db,model,id,user):
     item=db.scalar(select(model).where(model.id==id,model.organization_id==user.organization_id))
@@ -46,6 +50,8 @@ def sync_patient_finance(db:Session,patient:Patient):
             db.add(FinanceEntry(organization_id=patient.organization_id,patient_id=patient.id,entry_type="income",source="patient_sessions",description=f"Sessão {index+1}/{patient.session_count} — {patient.name}",amount=patient.session_value,due_date=datetime.now(timezone.utc).date()+timedelta(days=index*7),paid=False))
 @router.post("/auth/register",response_model=Message,status_code=201)
 def register(data:Register,db:Session=Depends(get_db)):
+    operational=platform_settings(db)
+    if not operational.registration_enabled or operational.maintenance_mode: raise HTTPException(503,operational.maintenance_message if operational.maintenance_mode else "Novos cadastros estão temporariamente suspensos")
     if not data.accept_lgpd: raise HTTPException(422,"É necessário aceitar o consentimento de privacidade")
     if db.scalar(select(User).where(User.email==data.email.lower())): raise HTTPException(409,"E-mail já cadastrado")
     org=Organization(name=data.organization_name); db.add(org); db.flush()
@@ -56,7 +62,7 @@ def register(data:Register,db:Session=Depends(get_db)):
     db.add(user); plan=db.scalar(select(Plan).where(Plan.code=="pro"))
     if not plan:
         plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
-    db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=30)).date())); db.commit()
+    db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=operational.trial_days)).date())); db.commit()
     send_verification_email(user.id,user.email)
     return Message(message="Cadastro realizado. Verifique seu e-mail para ativar a conta.")
 @router.get("/auth/verify-email",response_model=Message)
@@ -82,6 +88,8 @@ def login(data:Login,request:Request,db:Session=Depends(get_db)):
     return Token(access_token=create_token(user.id))
 @router.post("/auth/google",response_model=Token)
 def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
+    operational=platform_settings(db)
+    if not operational.google_login_enabled: raise HTTPException(503,"Login com Google temporariamente desativado")
     if not settings.google_client_id:
         raise HTTPException(503,"Login com Google ainda não está configurado")
     try:
@@ -115,7 +123,7 @@ def google_auth(data:GoogleAuth,db:Session=Depends(get_db)):
             plan=db.scalar(select(Plan).where(Plan.code=="pro"))
             if not plan:
                 plan=Plan(code="pro",name="Impacto Care",monthly_price=Decimal("59.90"),annual_monthly_price=Decimal("39.90")); db.add(plan); db.flush()
-            db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=30)).date()))
+            db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=operational.trial_days)).date()))
     if not user.is_active: raise HTTPException(403,"Conta desativada")
     user.last_login_at=datetime.now(timezone.utc)
     db.commit()
@@ -421,6 +429,32 @@ def create_support_ticket(data:SupportTicketIn,user:User=Depends(current_user),d
 @router.get("/admin/overview")
 def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
     return {"organizations":db.scalar(select(func.count()).select_from(Organization)),"users":db.scalar(select(func.count()).select_from(User)),"patients":db.scalar(select(func.count()).select_from(Patient))}
+@router.get("/admin/settings")
+def admin_get_settings(user:User=Depends(admin),db:Session=Depends(get_db)):
+    plan=db.scalar(select(Plan).where(Plan.code=="pro"))
+    return {"settings":platform_settings(db).model_dump(mode="json"),"plan":{"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"active":plan.active} if plan else None,"integrations":{"smtp":bool(settings.smtp_host and settings.smtp_username),"google":bool(settings.google_client_id),"turnstile":bool(settings.turnstile_secret_key),"asaas":bool(settings.asaas_api_key),"asaas_webhook":bool(settings.asaas_webhook_token),"maps":bool(settings.geocoder_url and settings.routing_url)},"environment":{"frontend_url":settings.frontend_url,"asaas_environment":"produção" if "sandbox" not in settings.asaas_api_url else "homologação"}}
+@router.put("/admin/settings",response_model=AdminSettings)
+def admin_save_settings(data:AdminSettings,user:User=Depends(admin),db:Session=Depends(get_db)):
+    item=db.scalar(select(SystemSetting).where(SystemSetting.key==ADMIN_SETTINGS_KEY))
+    if item: item.value=data.model_dump(mode="json");item.updated_by_id=user.id
+    else: db.add(SystemSetting(key=ADMIN_SETTINGS_KEY,value=data.model_dump(mode="json"),updated_by_id=user.id))
+    audit(db,user,"update","system_settings");db.commit();return data
+@router.put("/admin/plan")
+def admin_save_plan(data:AdminPlanUpdate,user:User=Depends(admin),db:Session=Depends(get_db)):
+    item=db.scalar(select(Plan).where(Plan.code=="pro"))
+    if not item: item=Plan(code="pro",**data.model_dump());db.add(item)
+    else:
+        for key,value in data.model_dump().items(): setattr(item,key,value)
+    audit(db,user,"update","plan");db.commit();return {"message":"Plano atualizado"}
+@router.patch("/admin/users/{user_id}")
+def admin_update_user(user_id:str,data:AdminUserUpdate,user:User=Depends(admin),db:Session=Depends(get_db)):
+    account=db.get(User,user_id)
+    if not account: raise HTTPException(404,"Usuário não encontrado")
+    if account.id==user.id and data.is_active is False: raise HTTPException(409,"O administrador não pode desativar a própria conta")
+    if data.is_active is not None: account.is_active=data.is_active
+    if data.email_verified is True and account.email_verified_at is None: account.email_verified_at=datetime.now(timezone.utc)
+    if data.email_verified is False: account.email_verified_at=None
+    audit(db,user,"update","user_access");db.commit();return {"message":"Usuário atualizado"}
 @router.get("/admin/support/tickets",response_model=list[SupportTicketOut])
 def admin_support_tickets(user:User=Depends(admin),db:Session=Depends(get_db)):
     return db.scalars(select(SupportTicket).order_by(SupportTicket.created_at.desc())).all()
