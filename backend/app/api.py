@@ -422,9 +422,19 @@ def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional)
 def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-access-token"),db:Session=Depends(get_db)):
     if not settings.asaas_webhook_token or not asaas_token or not secrets.compare_digest(asaas_token,settings.asaas_webhook_token): raise HTTPException(401,"Webhook não autorizado")
     event_type=str(payload.get("event","")).upper(); payment=payload.get("payment") or {}; event_id=str(payload.get("id") or hashlib.sha256(json.dumps(payload,sort_keys=True,default=str).encode()).hexdigest())
-    if db.scalar(select(BillingWebhookEvent).where(BillingWebhookEvent.event_id==event_id)): return {"received":True,"duplicate":True}
-    db.add(BillingWebhookEvent(gateway="asaas",event_id=event_id,event_type=event_type,payload=payload))
-    reference=payment.get("externalReference") or payload.get("externalReference"); item=db.get(Subscription,reference) if reference else None
+    existing_event=db.scalar(select(BillingWebhookEvent).where(BillingWebhookEvent.event_id==event_id))
+    reference=payment.get("externalReference") or payload.get("externalReference")
+    item=db.get(Subscription,reference) if reference else None
+    # O Checkout ASAAS pode não repetir externalReference no objeto payment. Nesse
+    # caso, checkoutSession corresponde ao id devolvido por POST /checkouts e
+    # persistido em Subscription.external_id durante a criação do checkout.
+    checkout_session=payment.get("checkoutSession") or payload.get("checkoutSession")
+    if not item and checkout_session:
+        item=db.scalar(select(Subscription).where(Subscription.external_id==str(checkout_session)))
+    if existing_event and (not item or item.status==SubscriptionStatus.ACTIVE):
+        return {"received":True,"duplicate":True}
+    if not existing_event:
+        db.add(BillingWebhookEvent(gateway="asaas",event_id=event_id,event_type=event_type,payload=payload))
     if item:
         billing_type=str(payment.get("billingType") or "").upper()
         payment_activates=event_type=="PAYMENT_CONFIRMED" or (event_type=="PAYMENT_RECEIVED" and billing_type!="CREDIT_CARD")

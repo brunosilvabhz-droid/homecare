@@ -119,6 +119,12 @@ def test_tenant_flow(monkeypatch):
     assert client.get("/api/v1/billing/subscription",headers=headers).json()["status"]=="active"
     duplicate=client.post("/api/v1/webhooks/asaas",json=event,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"})
     assert duplicate.json()["duplicate"] is True
+    with SessionLocal() as db:
+        item=db.get(Subscription,subscription_id);item.status=SubscriptionStatus.TRIAL;item.external_id="checkout_session_pix_1";db.commit()
+    checkout_event={"id":"evt_checkout_session_1","event":"PAYMENT_RECEIVED","payment":{"externalReference":None,"checkoutSession":"checkout_session_pix_1","billingType":"PIX"}}
+    checkout_webhook=client.post("/api/v1/webhooks/asaas",json=checkout_event,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"})
+    assert checkout_webhook.status_code==200
+    assert client.get("/api/v1/billing/subscription",headers=headers).json()["status"]=="active"
     period_end=client.get("/api/v1/billing/subscription",headers=headers).json()["current_period_end"]
     card_received={"id":"evt_test_card_received","event":"PAYMENT_RECEIVED","payment":{"externalReference":subscription_id,"billingType":"CREDIT_CARD","subscription":"sub_test_1"}}
     assert client.post("/api/v1/webhooks/asaas",json=card_received,headers={"asaas-access-token":"webhook-token-seguro-com-mais-de-32-caracteres"}).status_code==200
