@@ -1,12 +1,12 @@
 from datetime import date, datetime, timezone, time, timedelta
-import hashlib, secrets
+import base64, binascii, hashlib, secrets
 import json
 import logging
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from zoneinfo import ZoneInfo
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, Response
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -136,6 +136,18 @@ def reset_password(data:PasswordReset,db:Session=Depends(get_db)):
     return Message(message="Senha redefinida com sucesso.")
 @router.get("/me",response_model=UserOut)
 def me(user:User=Depends(current_user)): return user
+@router.put("/me/profile-photo",response_model=Message)
+def profile_photo(data:ProfilePhotoIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+    try: content=base64.b64decode(data.content_base64,validate=True)
+    except (binascii.Error,ValueError): raise HTTPException(422,"Imagem inválida")
+    if not content or len(content)>1024*1024: raise HTTPException(422,"A foto deve ter no máximo 1 MB")
+    user.profile_photo=content;user.profile_photo_content_type=data.content_type;user.profile_photo_updated_at=datetime.now(timezone.utc);db.commit()
+    return Message(message="Foto do perfil atualizada")
+@router.get("/public/professionals/{professional_id}/photo")
+def public_profile_photo(professional_id:str,db:Session=Depends(get_db)):
+    user=db.get(User,professional_id)
+    if not user or user.role!=Role.PROFESSIONAL or not user.profile_photo: raise HTTPException(404,"Foto não encontrada")
+    return Response(content=user.profile_photo,media_type=user.profile_photo_content_type or "image/jpeg",headers={"Cache-Control":"public, max-age=3600"})
 @router.get("/dashboard",response_model=Dashboard)
 def dashboard(user:User=Depends(professional),db:Session=Depends(get_db)):
     org=user.organization_id; start=datetime.now(timezone.utc); today=start.date(); past=today-timedelta(days=30); future=today+timedelta(days=30)
@@ -144,6 +156,18 @@ def dashboard(user:User=Depends(professional),db:Session=Depends(get_db)):
     revenue=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(True),FinanceEntry.due_date>=past,FinanceEntry.due_date<=today)) or Decimal(0)
     pending=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(False),FinanceEntry.due_date>=today,FinanceEntry.due_date<=future)) or Decimal(0)
     return Dashboard(patients=patients,upcoming_visits=upcoming,revenue_last_30_days=revenue,receivable_next_30_days=pending)
+@router.get("/dashboard/chart",response_model=list[DashboardChartItem])
+def dashboard_chart(user:User=Depends(professional),db:Session=Depends(get_db)):
+    now_local=datetime.now(LOCAL_TZ); months=[]
+    for offset in range(5,-1,-1):
+        month_index=now_local.year*12+now_local.month-1-offset;year=month_index//12;month=month_index%12+1
+        start=datetime(year,month,1,tzinfo=LOCAL_TZ);next_month=datetime(year+1,1,1,tzinfo=LOCAL_TZ) if month==12 else datetime(year,month+1,1,tzinfo=LOCAL_TZ)
+        start_utc=start.astimezone(timezone.utc);end_utc=next_month.astimezone(timezone.utc)
+        revenue=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==user.organization_id,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(True),FinanceEntry.due_date>=start.date(),FinanceEntry.due_date<next_month.date())) or Decimal(0)
+        visits_count=db.scalar(select(func.count()).select_from(Visit).where(Visit.organization_id==user.organization_id,Visit.starts_at>=start_utc,Visit.starts_at<end_utc,Visit.status!=VisitStatus.CANCELED)) or 0
+        records_count=db.scalar(select(func.count()).select_from(ServiceRecord).where(ServiceRecord.organization_id==user.organization_id,ServiceRecord.occurred_at>=start_utc,ServiceRecord.occurred_at<end_utc)) or 0
+        months.append(DashboardChartItem(label=start.strftime("%b/%y"),revenue=revenue,visits=visits_count,records=records_count))
+    return months
 @router.get("/patients",response_model=list[PatientOut])
 def patients(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(Patient).where(Patient.organization_id==user.organization_id)
@@ -257,6 +281,11 @@ def records(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(ServiceRecord).join(Patient).where(ServiceRecord.organization_id==user.organization_id)
     if user.role==Role.FAMILY: q=q.where(Patient.family_user_id==user.id)
     return db.scalars(q.order_by(ServiceRecord.occurred_at.desc())).all()
+@router.get("/records/{record_id}",response_model=RecordOut)
+def record_detail(record_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    item=owned(db,ServiceRecord,record_id,user)
+    if user.role==Role.FAMILY and item.patient.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
+    return item
 @router.post("/records",response_model=RecordOut,status_code=201)
 def create_record(data:RecordIn,user:User=Depends(professional),db:Session=Depends(get_db)):
     owned(db,Patient,data.patient_id,user); values=data.model_dump(exclude_none=True); item=ServiceRecord(**values,professional_id=user.id,organization_id=user.organization_id); db.add(item); audit(db,user,"create","service_record"); db.commit(); db.refresh(item); return item
@@ -392,6 +421,15 @@ def create_support_ticket(data:SupportTicketIn,user:User=Depends(current_user),d
 @router.get("/admin/overview")
 def admin_overview(user:User=Depends(admin),db:Session=Depends(get_db)):
     return {"organizations":db.scalar(select(func.count()).select_from(Organization)),"users":db.scalar(select(func.count()).select_from(User)),"patients":db.scalar(select(func.count()).select_from(Patient))}
+@router.get("/admin/support/tickets",response_model=list[SupportTicketOut])
+def admin_support_tickets(user:User=Depends(admin),db:Session=Depends(get_db)):
+    return db.scalars(select(SupportTicket).order_by(SupportTicket.created_at.desc())).all()
+@router.patch("/admin/support/tickets/{ticket_id}",response_model=SupportTicketOut)
+def admin_update_support_ticket(ticket_id:str,data:SupportTicketAdminUpdate,user:User=Depends(admin),db:Session=Depends(get_db)):
+    item=db.get(SupportTicket,ticket_id)
+    if not item: raise HTTPException(404,"Chamado não encontrado")
+    item.admin_response=data.response.strip();item.responded_at=datetime.now(timezone.utc);item.status="closed" if data.close else "answered";item.closed_at=datetime.now(timezone.utc) if data.close else None
+    audit(db,user,"respond","support_ticket");db.commit();db.refresh(item);return item
 
 @router.get("/admin/users")
 def admin_users(user:User=Depends(admin),db:Session=Depends(get_db)):

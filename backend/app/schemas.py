@@ -31,7 +31,9 @@ class Login(BaseModel): email:EmailStr; password:str; captcha_token:str|None=Non
 class Token(BaseModel): access_token:str; token_type:str="bearer"
 class Message(BaseModel): message:str
 class SupportTicketIn(BaseModel): category:Literal["error","question","suggestion","request"]; description:str=Field(min_length=10,max_length=5000)
-class SupportTicketOut(Out): id:str; ticket_number:str; category:str; description:str; status:str; email_sent_at:datetime|None; created_at:datetime
+class SupportTicketOut(Out): id:str; ticket_number:str; category:str; description:str; status:str; email_sent_at:datetime|None; admin_response:str|None; responded_at:datetime|None; closed_at:datetime|None; created_at:datetime
+class SupportTicketAdminUpdate(BaseModel): response:str=Field(min_length=2,max_length=5000); close:bool=False
+class ProfilePhotoIn(BaseModel): content_base64:str; content_type:Literal["image/jpeg","image/png","image/webp"]
 class EmailAction(BaseModel): email:EmailStr
 class PasswordReset(BaseModel): token:str; password:str=Field(min_length=8,max_length=128)
 class GoogleAuth(BaseModel):
@@ -57,6 +59,7 @@ class AvailableSlot(BaseModel): starts_at:datetime; ends_at:datetime
 class FinanceIn(BaseModel): patient_id:str|None=None; entry_type:str="income"; description:str; amount:Decimal=Field(gt=0); due_date:date; paid:bool=False
 class FinanceOut(FinanceIn, Out): id:str; source:str|None=None; patient:PatientOut|None=None
 class Dashboard(BaseModel): patients:int; upcoming_visits:int; revenue_last_30_days:Decimal; receivable_next_30_days:Decimal
+class DashboardChartItem(BaseModel): label:str; revenue:Decimal; visits:int; records:int
 class SubscriptionOut(Out): id:str; status:str; billing_cycle:str; current_period_end:date|None; gateway:str|None
 class VehicleIn(BaseModel): name:str; fuel_type:str="gasoline"; average_km_per_liter:Decimal=Field(gt=0); fuel_price:Decimal=Field(ge=0); additional_cost_per_km:Decimal=Field(ge=0,default=0); is_default:bool=False
 class VehicleOut(VehicleIn,Out): id:str; organization_id:str

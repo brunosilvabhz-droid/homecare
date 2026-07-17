@@ -1,7 +1,7 @@
 import enum, uuid
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-from sqlalchemy import String, Date, DateTime, Time, ForeignKey, Text, Numeric, Boolean, Enum, Float, JSON
+from sqlalchemy import String, Date, DateTime, Time, ForeignKey, Text, Numeric, Boolean, Enum, Float, JSON, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship as orm_relationship
 from app.db.base import Base
 
@@ -20,6 +20,7 @@ class Organization(Base, TimeMixin):
     __tablename__="organizations"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); name: Mapped[str]=mapped_column(String(120))
 class User(Base, TenantMixin, TimeMixin):
     __tablename__="users"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); name: Mapped[str]=mapped_column(String(120)); email: Mapped[str]=mapped_column(String(255), unique=True, index=True); password_hash: Mapped[str]=mapped_column(String(255)); role: Mapped[Role]=mapped_column(Enum(Role)); is_active: Mapped[bool]=mapped_column(Boolean, default=True); email_verified_at: Mapped[datetime | None]=mapped_column(DateTime(timezone=True), nullable=True); last_login_at: Mapped[datetime | None]=mapped_column(DateTime(timezone=True), nullable=True); default_session_duration_minutes: Mapped[int]=mapped_column(default=60); phone: Mapped[str | None]=mapped_column(String(30), nullable=True); cpf: Mapped[str | None]=mapped_column(String(14), nullable=True); profession: Mapped[str | None]=mapped_column(String(60), nullable=True); profession_other: Mapped[str | None]=mapped_column(String(100), nullable=True); council_name: Mapped[str | None]=mapped_column(String(30), nullable=True); council_code: Mapped[str | None]=mapped_column(String(40), nullable=True); council_state: Mapped[str | None]=mapped_column(String(2), nullable=True); postal_code: Mapped[str | None]=mapped_column(String(9), nullable=True); address: Mapped[str | None]=mapped_column(String(255), nullable=True); address_number: Mapped[str | None]=mapped_column(String(20), nullable=True); address_complement: Mapped[str | None]=mapped_column(String(100), nullable=True); neighborhood: Mapped[str | None]=mapped_column(String(100), nullable=True); city: Mapped[str | None]=mapped_column(String(100), nullable=True); state: Mapped[str | None]=mapped_column(String(2), nullable=True); lgpd_consent_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
+    profile_photo: Mapped[bytes | None]=mapped_column(LargeBinary,nullable=True); profile_photo_content_type: Mapped[str | None]=mapped_column(String(40),nullable=True); profile_photo_updated_at: Mapped[datetime | None]=mapped_column(DateTime(timezone=True),nullable=True)
 class ProfessionalAvailability(Base, TenantMixin, TimeMixin):
     __tablename__="professional_availabilities"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); professional_id: Mapped[str]=mapped_column(ForeignKey("users.id"),index=True); weekday: Mapped[int]=mapped_column(index=True); start_time: Mapped[time]=mapped_column(Time); end_time: Mapped[time]=mapped_column(Time); is_active: Mapped[bool]=mapped_column(Boolean,default=True)
 class GoogleIdentity(Base, TimeMixin):
@@ -50,6 +51,9 @@ class SupportTicket(Base, TenantMixin, TimeMixin):
     description: Mapped[str]=mapped_column(Text)
     status: Mapped[str]=mapped_column(String(20),default="open",index=True)
     email_sent_at: Mapped[datetime | None]=mapped_column(DateTime(timezone=True),nullable=True)
+    admin_response: Mapped[str | None]=mapped_column(Text,nullable=True)
+    responded_at: Mapped[datetime | None]=mapped_column(DateTime(timezone=True),nullable=True)
+    closed_at: Mapped[datetime | None]=mapped_column(DateTime(timezone=True),nullable=True)
 class AuditLog(Base):
     __tablename__="audit_logs"; id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid); organization_id: Mapped[str]=mapped_column(String(36), index=True); user_id: Mapped[str]=mapped_column(String(36)); action: Mapped[str]=mapped_column(String(80)); resource: Mapped[str]=mapped_column(String(80)); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 class Plan(Base):
