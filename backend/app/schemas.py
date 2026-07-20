@@ -64,7 +64,7 @@ class GoogleAuth(BaseModel):
     @field_validator("phone")
     @classmethod
     def valid_phone(cls,value): return brazilian_phone(value,True) if value else value
-class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None; default_session_duration_minutes:int; professional_summary:str|None; specialties:str|None; education:str|None; experience_years:int|None; service_areas:str|None; professional_approach:str|None; signature_name:str|None; signature_council:str|None; signature_profession:str|None
+class UserOut(Out): id:str; name:str; email:EmailStr; role:Role; organization_id:str; email_verified_at:datetime|None; phone:str|None; profession:str|None; profession_other:str|None; council_name:str|None; council_code:str|None; council_state:str|None; default_session_duration_minutes:int; professional_summary:str|None; specialties:str|None; education:str|None; experience_years:int|None; service_areas:str|None; professional_approach:str|None; signature_name:str|None; signature_council:str|None; signature_profession:str|None; organization_type:str|None=None
 class ProfessionalProfileUpdate(BaseModel): professional_summary:str|None=Field(default=None,max_length=2000); specialties:str|None=Field(default=None,max_length=1000); education:str|None=Field(default=None,max_length=1500); experience_years:int|None=Field(default=None,ge=0,le=80); service_areas:str|None=Field(default=None,max_length=1000); professional_approach:str|None=Field(default=None,max_length=1500)
 class ResponsibleCreate(BaseModel):
     name:str; relationship:str; phone:str|None=None; email:EmailStr|None=None
@@ -149,7 +149,19 @@ class IntakeSubmit(BaseModel):
 class CheckoutCreate(BaseModel):
     billing_cycle:BillingCycle
     payment_method:Literal["credit_card","pix"]="credit_card"
-    plan_code:Literal["pro","premium"]="pro"
+    plan_code:Literal["pro","premium","company"]="pro"
+    seat_count:int|None=Field(default=None,ge=6,le=500)
+class CompanyRegister(BaseModel):
+    company_name:str=Field(min_length=2,max_length=120); document:str|None=Field(default=None,max_length=18); admin_name:str=Field(min_length=3,max_length=120); email:EmailStr; password:str=Field(min_length=8,max_length=128); phone:str=Field(min_length=10,max_length=30); cpf:str=Field(min_length=11,max_length=14); accept_lgpd:bool
+    @field_validator("cpf")
+    @classmethod
+    def valid_cpf(cls,value): return cpf_digits(value)
+    @field_validator("phone")
+    @classmethod
+    def valid_phone(cls,value): return brazilian_phone(value,True)
+class CompanyInviteCreate(BaseModel): name:str=Field(min_length=3,max_length=120);email:EmailStr;role:Literal["professional","coordinator"]="professional";profession:str|None=None
+class CompanyInviteAccept(BaseModel): token:str;password:str=Field(min_length=8,max_length=128);phone:str|None=None;cpf:str|None=None;accept_lgpd:bool
+class CompanyMemberUpdate(BaseModel): is_active:bool|None=None;role:Literal["professional","coordinator"]|None=None
 class AIAnalysisCreate(BaseModel): analysis_type:Literal["preparation","evolution"]
 class AIAnalysisOut(Out): id:str;visit_id:str;analysis_type:str;content:dict;model:str;created_at:datetime
 class CommunicationPreferences(BaseModel): email_operational:bool=True; email_guidance:bool=True; email_billing:bool=True; email_marketing:bool=False; whatsapp_allowed:bool=False

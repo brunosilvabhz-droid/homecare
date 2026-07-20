@@ -28,6 +28,36 @@ def test_subscription_access_policy():
     assert subscription_access(monthly,today)["phase"]=="grace"
     monthly.current_period_end=today-timedelta(days=6)
     assert subscription_access(monthly,today)["blocked"] is True
+
+def test_company_registration_team_and_financial_permissions(monkeypatch):
+    payload={"company_name":"Cuidar Bem Ltda","document":"12.345.678/0001-90","admin_name":"Marina Gestora","email":"marina.empresa@example.com","password":"EmpresaSegura123","phone":"31988887777","cpf":"52998224725","accept_lgpd":True}
+    registered=client.post("/api/v1/auth/register-company",json=payload)
+    assert registered.status_code==201
+    with SessionLocal() as db:
+        company_admin=db.query(User).filter(User.email==payload["email"]).one()
+        assert company_admin.role==Role.COMPANY_ADMIN
+        organization=db.get(Organization,company_admin.organization_id)
+        assert organization.account_type=="company" and organization.licensed_seats==6
+        verification=create_email_token(company_admin.id)
+    assert client.get("/api/v1/auth/verify-email",params={"token":verification}).status_code==200
+    admin_headers={"Authorization":f"Bearer {create_token(company_admin.id)}"}
+    summary=client.get("/api/v1/company/summary",headers=admin_headers)
+    assert summary.status_code==200 and summary.json()["available_seats"]==5
+    monkeypatch.setattr("app.api.send_relationship_email",lambda *args:True)
+    invitation=client.post("/api/v1/company/invitations",json={"name":"Paulo Fisio","email":"paulo.fisio@example.com","role":"professional","profession":"physiotherapist"},headers=admin_headers)
+    assert invitation.status_code==201
+    with SessionLocal() as db:
+        from app.models import CompanyInvitation
+        pending=db.get(CompanyInvitation,invitation.json()["id"])
+        raw_token="convite-empresa-teste"
+        import hashlib
+        pending.token_hash=hashlib.sha256(raw_token.encode()).hexdigest();db.commit()
+    accepted=client.post("/api/v1/company/invitations/accept",json={"token":raw_token,"password":"Profissional123","phone":"31977776666","cpf":"52998224725","accept_lgpd":True})
+    assert accepted.status_code==200
+    member_headers={"Authorization":f"Bearer {accepted.json()['access_token']}"}
+    assert client.get("/api/v1/finance",headers=member_headers).status_code==403
+    assert client.get("/api/v1/billing/subscription",headers=member_headers).status_code==403
+    assert len(client.get("/api/v1/company/members",headers=admin_headers).json())==2
 def test_tenant_flow(monkeypatch):
     payload={"name":"Ana Souza","email":"ana@example.com","password":"segura123","organization_name":"Ana Cuidados","phone":"31999999999","cpf":"52998224725","profession":"nurse","council_name":"COREN","council_code":"123456","council_state":"MG","city":"Belo Horizonte","state":"MG","accept_lgpd":True}
     registered=client.post("/api/v1/auth/register",json=payload)

@@ -15,16 +15,16 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from app.db.session import get_db
-from app.deps import current_user, professional, account_professional, admin
+from app.deps import current_user, professional, account_professional, admin, company_manager, financial_manager, finance_manager
 from app.core.security import hash_password, verify_password, create_token, decode_email_token, decode_password_reset_token
-from app.core.email import send_verification_email, send_password_reset_email, send_support_ticket_email, send_visit_change_email
+from app.core.email import send_verification_email, send_password_reset_email, send_support_ticket_email, send_visit_change_email, send_relationship_email
 from app.core.routing import geocode, calculate_route, money
 from app.core.config import settings
 from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
 from app.core.ai import generate_analysis
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog, ContextMessageInteraction, ExitSurveyResponse
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog, ContextMessageInteraction, ExitSurveyResponse, CompanyInvitation
 from app.relationship_automation import ensure_templates
 from app.onboarding import event as product_event, status as onboarding_status
 from app.schemas import *
@@ -34,6 +34,9 @@ def platform_settings(db:Session)->AdminSettings:
     item=db.scalar(select(SystemSetting).where(SystemSetting.key==ADMIN_SETTINGS_KEY))
     return AdminSettings.model_validate(item.value if item else {})
 def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organization_id,user_id=user.id,action=action,resource=resource))
+def is_expired(value:datetime)->bool:
+    now=datetime.now(timezone.utc)
+    return value < (now.replace(tzinfo=None) if value.tzinfo is None else now)
 def owned(db,model,id,user):
     item=db.scalar(select(model).where(model.id==id,model.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Recurso não encontrado")
@@ -86,6 +89,21 @@ def register(data:Register,db:Session=Depends(get_db)):
     db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=operational.trial_days)).date())); db.commit()
     send_verification_email(user.id,user.email)
     return Message(message="Cadastro realizado. Verifique seu e-mail para ativar a conta.")
+@router.post("/auth/register-company",response_model=Message,status_code=201)
+def register_company(data:CompanyRegister,db:Session=Depends(get_db)):
+    operational=platform_settings(db)
+    if not operational.registration_enabled or operational.maintenance_mode: raise HTTPException(503,operational.maintenance_message if operational.maintenance_mode else "Novos cadastros estão temporariamente suspensos")
+    if not data.accept_lgpd: raise HTTPException(422,"É necessário aceitar os termos e o aviso de privacidade")
+    email=str(data.email).lower()
+    if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,"E-mail já cadastrado")
+    org=Organization(name=data.company_name,account_type="company",document=data.document,licensed_seats=6);db.add(org);db.flush()
+    user=User(name=data.admin_name,email=email,password_hash=hash_password(data.password),role=Role.COMPANY_ADMIN,organization_id=org.id,phone=data.phone,cpf=data.cpf,registration_source="company",profession="other",profession_other="Administrador da empresa");db.add(user);db.flush()
+    plan=db.scalar(select(Plan).where(Plan.code=="company"))
+    if not plan:
+        plan=Plan(code="company",name="Impacto Care Empresarial",monthly_price=Decimal("25.00"),annual_monthly_price=Decimal("25.00"),per_seat=True,minimum_seats=6,ai_daily_limit=20,whatsapp_monthly_limit=100);db.add(plan);db.flush()
+    db.add(Subscription(organization_id=org.id,plan_id=plan.id,status=SubscriptionStatus.TRIAL,billing_cycle=BillingCycle.MONTHLY,current_period_end=(datetime.now(timezone.utc)+timedelta(days=platform_settings(db).trial_days)).date()));db.commit()
+    send_verification_email(user.id,user.email)
+    return Message(message="Empresa cadastrada. Verifique seu e-mail para ativar a conta administrativa.")
 @router.get("/auth/verify-email",response_model=Message)
 def verify_email(token:str,db:Session=Depends(get_db)):
     user_id=decode_email_token(token); user=db.get(User,user_id) if user_id else None
@@ -167,7 +185,60 @@ def reset_password(data:PasswordReset,db:Session=Depends(get_db)):
     db.commit()
     return Message(message="Senha redefinida com sucesso.")
 @router.get("/me",response_model=UserOut)
-def me(user:User=Depends(current_user)): return user
+def me(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    result=UserOut.model_validate(user).model_dump();organization=db.get(Organization,user.organization_id);result["organization_type"]=organization.account_type if organization else "individual";return result
+@router.get("/company/invitations/{token}")
+def public_company_invitation(token:str,db:Session=Depends(get_db)):
+    item=db.scalar(select(CompanyInvitation).where(CompanyInvitation.token_hash==hashlib.sha256(token.encode()).hexdigest()))
+    if not item or item.revoked_at or item.accepted_at or is_expired(item.expires_at): raise HTTPException(404,"Convite inválido ou expirado")
+    organization=db.get(Organization,item.organization_id);return {"company_name":organization.name,"name":item.name,"email":item.email,"role":item.role.value,"profession":item.profession}
+@router.post("/company/invitations/accept",response_model=Token)
+def accept_company_invitation(data:CompanyInviteAccept,db:Session=Depends(get_db)):
+    item=db.scalar(select(CompanyInvitation).where(CompanyInvitation.token_hash==hashlib.sha256(data.token.encode()).hexdigest()))
+    if not item or item.revoked_at or item.accepted_at or is_expired(item.expires_at): raise HTTPException(404,"Convite inválido ou expirado")
+    if not data.accept_lgpd: raise HTTPException(422,"É necessário aceitar o aviso de privacidade")
+    if db.scalar(select(User).where(User.email==item.email)): raise HTTPException(409,"Já existe uma conta com este e-mail")
+    user=User(name=item.name,email=item.email,password_hash=hash_password(data.password),role=item.role,organization_id=item.organization_id,phone=data.phone,cpf=data.cpf,profession=item.profession,email_verified_at=datetime.now(timezone.utc),registration_source="company_invite");db.add(user);item.accepted_at=datetime.now(timezone.utc);db.commit();return Token(access_token=create_token(user.id))
+@router.get("/company/summary")
+def company_summary(user:User=Depends(company_manager),db:Session=Depends(get_db)):
+    organization=db.get(Organization,user.organization_id);member_roles=(Role.COMPANY_ADMIN,Role.COORDINATOR,Role.PROFESSIONAL)
+    occupied=db.scalar(select(func.count()).select_from(User).where(User.organization_id==organization.id,User.role.in_(member_roles),User.is_active.is_(True))) or 0
+    pending=db.scalar(select(func.count()).select_from(CompanyInvitation).where(CompanyInvitation.organization_id==organization.id,CompanyInvitation.accepted_at.is_(None),CompanyInvitation.revoked_at.is_(None),CompanyInvitation.expires_at>=datetime.now(timezone.utc))) or 0
+    return {"id":organization.id,"name":organization.name,"document":organization.document,"licensed_seats":organization.licensed_seats,"occupied_seats":occupied,"pending_invitations":pending,"available_seats":max(0,organization.licensed_seats-occupied-pending)}
+@router.get("/company/members")
+def company_members(user:User=Depends(company_manager),db:Session=Depends(get_db)):
+    roles=(Role.COMPANY_ADMIN,Role.COORDINATOR,Role.PROFESSIONAL)
+    members=db.scalars(select(User).where(User.organization_id==user.organization_id,User.role.in_(roles)).order_by(User.name)).all()
+    return [{"id":item.id,"name":item.name,"email":item.email,"role":item.role.value,"profession":item.profession,"is_active":item.is_active,"last_login_at":item.last_login_at,"created_at":item.created_at} for item in members]
+@router.get("/company/invitations")
+def company_invitations(user:User=Depends(company_manager),db:Session=Depends(get_db)):
+    items=db.scalars(select(CompanyInvitation).where(CompanyInvitation.organization_id==user.organization_id).order_by(CompanyInvitation.created_at.desc())).all()
+    return [{"id":item.id,"name":item.name,"email":item.email,"role":item.role.value,"profession":item.profession,"status":"accepted" if item.accepted_at else "revoked" if item.revoked_at else "expired" if is_expired(item.expires_at) else "pending","expires_at":item.expires_at} for item in items]
+@router.post("/company/invitations",status_code=201)
+def create_company_invitation(data:CompanyInviteCreate,user:User=Depends(company_manager),db:Session=Depends(get_db)):
+    organization=db.get(Organization,user.organization_id);email=str(data.email).lower()
+    if db.scalar(select(User).where(User.email==email)): raise HTTPException(409,"E-mail já cadastrado")
+    active=db.scalar(select(func.count()).select_from(User).where(User.organization_id==organization.id,User.role.in_((Role.COMPANY_ADMIN,Role.COORDINATOR,Role.PROFESSIONAL)),User.is_active.is_(True))) or 0
+    pending=db.scalar(select(func.count()).select_from(CompanyInvitation).where(CompanyInvitation.organization_id==organization.id,CompanyInvitation.accepted_at.is_(None),CompanyInvitation.revoked_at.is_(None),CompanyInvitation.expires_at>=datetime.now(timezone.utc))) or 0
+    if active+pending>=organization.licensed_seats: raise HTTPException(409,"Todas as licenças estão ocupadas. Contrate uma licença adicional.")
+    previous=db.scalars(select(CompanyInvitation).where(CompanyInvitation.organization_id==organization.id,CompanyInvitation.email==email,CompanyInvitation.accepted_at.is_(None),CompanyInvitation.revoked_at.is_(None))).all()
+    for old in previous: old.revoked_at=datetime.now(timezone.utc)
+    raw=secrets.token_urlsafe(32);item=CompanyInvitation(organization_id=organization.id,name=data.name,email=email,role=Role(data.role),profession=data.profession,token_hash=hashlib.sha256(raw.encode()).hexdigest(),invited_by_id=user.id,expires_at=datetime.now(timezone.utc)+timedelta(days=7));db.add(item);db.commit()
+    url=f"{settings.frontend_url.rstrip('/')}/convite-empresa?token={raw}"
+    send_relationship_email(email,f"Convite para {organization.name}",f"Olá, {data.name}. Você foi convidado para integrar a equipe da empresa {organization.name} no Impacto Care.","Aceitar convite",url)
+    return {"id":item.id,"message":"Convite enviado por e-mail.","expires_at":item.expires_at}
+@router.patch("/company/members/{member_id}")
+def update_company_member(member_id:str,data:CompanyMemberUpdate,user:User=Depends(company_manager),db:Session=Depends(get_db)):
+    member=db.scalar(select(User).where(User.id==member_id,User.organization_id==user.organization_id))
+    if not member or member.role not in (Role.PROFESSIONAL,Role.COORDINATOR): raise HTTPException(404,"Profissional não encontrado")
+    if data.is_active is not None: member.is_active=data.is_active
+    if data.role is not None: member.role=Role(data.role)
+    audit(db,user,"update","company_member");db.commit();return {"updated":True}
+@router.post("/company/invitations/{invitation_id}/revoke")
+def revoke_company_invitation(invitation_id:str,user:User=Depends(company_manager),db:Session=Depends(get_db)):
+    item=db.scalar(select(CompanyInvitation).where(CompanyInvitation.id==invitation_id,CompanyInvitation.organization_id==user.organization_id))
+    if not item or item.accepted_at: raise HTTPException(404,"Convite pendente não encontrado")
+    item.revoked_at=datetime.now(timezone.utc);db.commit();return {"revoked":True}
 @router.get("/onboarding",response_model=OnboardingStatus)
 def onboarding(user:User=Depends(professional),db:Session=Depends(get_db)):
     result=onboarding_status(db,user);db.commit();return result
@@ -223,8 +294,10 @@ def dashboard(user:User=Depends(professional),db:Session=Depends(get_db)):
     org=user.organization_id; start=datetime.now(timezone.utc); today=start.date(); past=today-timedelta(days=30); future=today+timedelta(days=30)
     patients=db.scalar(select(func.count()).select_from(Patient).where(Patient.organization_id==org,Patient.status=="active")) or 0
     upcoming=db.scalar(select(func.count()).select_from(Visit).where(Visit.organization_id==org,Visit.starts_at>=start,Visit.status==VisitStatus.SCHEDULED)) or 0
-    revenue=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(True),FinanceEntry.due_date>=past,FinanceEntry.due_date<=today)) or Decimal(0)
-    pending=db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(False),FinanceEntry.due_date>=today,FinanceEntry.due_date<=future)) or Decimal(0)
+    organization=db.get(Organization,user.organization_id)
+    can_see_finance=not organization or organization.account_type!="company" or user.role in (Role.COMPANY_ADMIN,Role.ADMIN)
+    revenue=(db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(True),FinanceEntry.due_date>=past,FinanceEntry.due_date<=today)) or Decimal(0)) if can_see_finance else Decimal(0)
+    pending=(db.scalar(select(func.coalesce(func.sum(FinanceEntry.amount),0)).where(FinanceEntry.organization_id==org,FinanceEntry.entry_type=="income",FinanceEntry.paid.is_(False),FinanceEntry.due_date>=today,FinanceEntry.due_date<=future)) or Decimal(0)) if can_see_finance else Decimal(0)
     return Dashboard(patients=patients,upcoming_visits=upcoming,revenue_last_30_days=revenue,receivable_next_30_days=pending)
 @router.get("/dashboard/chart",response_model=list[DashboardChartItem])
 def dashboard_chart(user:User=Depends(professional),db:Session=Depends(get_db)):
@@ -240,6 +313,8 @@ def dashboard_chart(user:User=Depends(professional),db:Session=Depends(get_db)):
     return months
 @router.get("/dashboard/finance-chart",response_model=list[FinanceChartItem])
 def dashboard_finance_chart(days:int=30,user:User=Depends(professional),db:Session=Depends(get_db)):
+    organization=db.get(Organization,user.organization_id)
+    if organization and organization.account_type=="company" and user.role not in (Role.COMPANY_ADMIN,Role.ADMIN): return []
     days=max(1,min(days,120));today=datetime.now(LOCAL_TZ).date();start=today-timedelta(days=days-1);end=today+timedelta(days=30);rows=[]
     entries=db.scalars(select(FinanceEntry).where(FinanceEntry.organization_id==user.organization_id,FinanceEntry.due_date>=start,FinanceEntry.due_date<=end)).all();by_day={}
     for entry in entries: by_day.setdefault(entry.due_date,[]).append(entry)
@@ -420,9 +495,9 @@ def record_pdf(record_id:str,user:User=Depends(current_user),db:Session=Depends(
 def create_record(data:RecordIn,user:User=Depends(professional),db:Session=Depends(get_db)):
     owned(db,Patient,data.patient_id,user); values=data.model_dump(exclude_none=True); item=ServiceRecord(**values,professional_id=user.id,organization_id=user.organization_id,professional_signature_name=user.signature_name or user.name,professional_signature_council=user.signature_council or " ".join(filter(None,[user.council_name,user.council_code,user.council_state])),professional_signature_profession=user.signature_profession or user.profession_other or user.profession); db.add(item); audit(db,user,"create","service_record"); db.commit(); db.refresh(item); return item
 @router.get("/finance",response_model=list[FinanceOut])
-def finance(user:User=Depends(professional),db:Session=Depends(get_db)): return db.scalars(select(FinanceEntry).where(FinanceEntry.organization_id==user.organization_id).order_by(FinanceEntry.due_date.desc())).all()
+def finance(user:User=Depends(finance_manager),db:Session=Depends(get_db)): return db.scalars(select(FinanceEntry).where(FinanceEntry.organization_id==user.organization_id).order_by(FinanceEntry.due_date.desc())).all()
 @router.post("/finance",response_model=FinanceOut,status_code=201)
-def create_finance(data:FinanceIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+def create_finance(data:FinanceIn,user:User=Depends(finance_manager),db:Session=Depends(get_db)):
     if data.patient_id: owned(db,Patient,data.patient_id,user)
     item=FinanceEntry(**data.model_dump(),organization_id=user.organization_id); db.add(item); audit(db,user,"create","finance"); db.commit(); db.refresh(item); return item
 @router.get("/vehicles",response_model=list[VehicleOut])
@@ -517,30 +592,34 @@ def ensure_subscription(db:Session,user:User)->Subscription:
     return item
 
 @router.get("/billing/subscription")
-def subscription(user:User=Depends(account_professional),db:Session=Depends(get_db)):
+def subscription(user:User=Depends(financial_manager),db:Session=Depends(get_db)):
     item=ensure_subscription(db,user)
     db.commit()
     plan=db.get(Plan,item.plan_id)
     limit,used=ai_limit(db,user)
-    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"code":plan.code,"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price,"ai_daily_limit":limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit},"ai_used_today":used,"gateway":item.gateway,"cancel_at_period_end":item.cancel_at_period_end,"cancellation_requested_at":item.cancellation_requested_at,**subscription_access(item)}
+    organization=db.get(Organization,user.organization_id)
+    return {"id":item.id,"status":item.status,"billing_cycle":item.billing_cycle,"current_period_end":item.current_period_end,"plan":{"code":plan.code,"name":plan.name,"monthly_price":plan.monthly_price,"annual_monthly_price":plan.annual_monthly_price,"ai_daily_limit":limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit,"per_seat":plan.per_seat,"minimum_seats":plan.minimum_seats},"licensed_seats":organization.licensed_seats,"ai_used_today":used,"gateway":item.gateway,"cancel_at_period_end":item.cancel_at_period_end,"cancellation_requested_at":item.cancellation_requested_at,**subscription_access(item)}
 @router.get("/billing/plans")
 def billing_plans(db:Session=Depends(get_db)):
-    return [{"code":plan.code,"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"ai_daily_limit":plan.ai_daily_limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit} for plan in db.scalars(select(Plan).where(Plan.active.is_(True)).order_by(Plan.monthly_price)).all()]
+    return [{"code":plan.code,"name":plan.name,"monthly_price":str(plan.monthly_price),"annual_monthly_price":str(plan.annual_monthly_price),"ai_daily_limit":plan.ai_daily_limit,"whatsapp_monthly_limit":plan.whatsapp_monthly_limit,"per_seat":plan.per_seat,"minimum_seats":plan.minimum_seats} for plan in db.scalars(select(Plan).where(Plan.active.is_(True)).order_by(Plan.monthly_price)).all()]
 @router.post("/billing/checkout")
-def billing_checkout(data:CheckoutCreate,user:User=Depends(account_professional),db:Session=Depends(get_db)):
+def billing_checkout(data:CheckoutCreate,user:User=Depends(financial_manager),db:Session=Depends(get_db)):
     item=ensure_subscription(db,user); plan=db.scalar(select(Plan).where(Plan.code==data.plan_code,Plan.active.is_(True)))
     if not plan: raise HTTPException(404,"Plano não encontrado")
+    organization=db.get(Organization,user.organization_id)
+    if organization.account_type=="company" and plan.code!="company": raise HTTPException(422,"Empresas devem contratar o plano empresarial")
+    if organization.account_type!="company" and plan.code=="company": raise HTTPException(422,"Plano disponível somente para empresas")
     first_due=item.current_period_end if item.status==SubscriptionStatus.TRIAL and item.current_period_end and item.current_period_end>datetime.now(timezone.utc).date() else datetime.now(timezone.utc).date()
-    annual=data.billing_cycle==BillingCycle.ANNUAL; value=Decimal(plan.annual_monthly_price)*12 if annual else Decimal(plan.monthly_price); cycle="YEARLY" if annual else "MONTHLY"
+    annual=data.billing_cycle==BillingCycle.ANNUAL;seats=max(plan.minimum_seats,data.seat_count or organization.licensed_seats) if plan.per_seat else 1;unit=Decimal(plan.annual_monthly_price) if annual else Decimal(plan.monthly_price);value=unit*seats*(12 if annual else 1);cycle="YEARLY" if annual else "MONTHLY"
     billing_type="PIX" if data.payment_method=="pix" else "CREDIT_CARD"
     payload={"billingTypes":[billing_type],"chargeTypes":["DETACHED" if data.payment_method=="pix" else "RECURRENT"],"minutesToExpire":60,"externalReference":item.id,"callback":{"successUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=success","cancelUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=cancel","expiredUrl":f"{settings.frontend_url.rstrip('/')}/app/billing?status=expired"},"items":[{"name":f"Impacto Care - {'Anual' if annual else 'Mensal'}","description":"Plataforma de gestão para profissionais de atendimento domiciliar","quantity":1,"value":float(value)}]}
     if data.payment_method!="pix": payload["subscription"]={"cycle":cycle,"nextDueDate":first_due.isoformat()}
     checkout=create_asaas_checkout(payload); checkout_id=checkout.get("id")
     if not checkout_id: raise HTTPException(502,"Resposta inválida do ASAAS")
-    item.gateway="asaas";item.external_id=checkout_id;item.pending_plan_id=plan.id;item.billing_cycle=data.billing_cycle;item.cancel_at_period_end=False;item.cancellation_requested_at=None;db.commit()
+    item.gateway="asaas";item.external_id=checkout_id;item.pending_plan_id=plan.id;item.pending_licensed_seats=seats if plan.per_seat else None;item.billing_cycle=data.billing_cycle;item.cancel_at_period_end=False;item.cancellation_requested_at=None;db.commit()
     return {"checkout_url":checkout.get("link") or f"{settings.asaas_checkout_url}?id={checkout_id}","expires_in_minutes":60}
 @router.post("/billing/cancel")
-def cancel_subscription(user:User=Depends(account_professional),db:Session=Depends(get_db)):
+def cancel_subscription(user:User=Depends(financial_manager),db:Session=Depends(get_db)):
     item=db.scalar(select(Subscription).where(Subscription.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Assinatura não encontrada")
     if item.cancel_at_period_end:
@@ -573,6 +652,8 @@ def asaas_webhook(payload:dict,asaas_token:str|None=Header(None,alias="asaas-acc
         if payment_activates:
             item.status=SubscriptionStatus.ACTIVE;item.cancel_at_period_end=False;item.cancellation_requested_at=None
             if item.pending_plan_id: item.plan_id=item.pending_plan_id;item.pending_plan_id=None
+            if item.pending_licensed_seats:
+                organization=db.get(Organization,item.organization_id);organization.licensed_seats=item.pending_licensed_seats;item.pending_licensed_seats=None
             days=365 if item.billing_cycle==BillingCycle.ANNUAL else 30;item.current_period_end=(datetime.now(timezone.utc)+timedelta(days=days)).date()
             account_user=db.scalar(select(User).where(User.organization_id==item.organization_id,User.role==Role.PROFESSIONAL).order_by(User.created_at))
             if account_user:
