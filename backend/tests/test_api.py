@@ -62,6 +62,15 @@ def test_tenant_flow(monkeypatch):
     patient=client.post("/api/v1/patients",json={"name":"Maria","phone":"31999999999","email":"maria@example.com","address":"Praça Sete","city":"Belo Horizonte","state":"MG","responsible":{"name":"Carlos","relationship":"Filho","phone":"31988888888"}},headers=headers)
     assert patient.status_code==201
     assert client.get("/api/v1/patients",headers=headers).json()[0]["name"]=="Maria"
+    other_patient=client.post("/api/v1/patients",json={"name":"Zilda sem acesso","phone":"31977777777"},headers=headers)
+    assert other_patient.status_code==201
+    invite=client.post(f"/api/v1/patients/{patient.json()['id']}/portal-invite",json={"name":"Familiar Maria","email":"familia.maria@example.com"},headers=headers)
+    assert invite.status_code==200
+    with SessionLocal() as db: family=db.query(User).filter(User.email=="familia.maria@example.com").one(); family_headers={"Authorization":f"Bearer {create_token(family.id)}"}
+    family_patients=client.get("/api/v1/patients",headers=family_headers)
+    assert family_patients.status_code==200 and [item["id"] for item in family_patients.json()]==[patient.json()["id"]]
+    assert client.get(f"/api/v1/patients/{patient.json()['id']}",headers=family_headers).status_code==200
+    assert client.get(f"/api/v1/patients/{other_patient.json()['id']}",headers=family_headers).status_code==403
     with SessionLocal() as db: assert db.query(Responsible).filter(Responsible.name=="Carlos").count()==1
     visit=client.post("/api/v1/visits",json={"patient_id":patient.json()["id"],"starts_at":datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(),"duration_minutes":60},headers=headers)
     target=(datetime.now(ZoneInfo("America/Sao_Paulo"))+timedelta(days=1)).replace(hour=10,minute=0,second=0,microsecond=0)

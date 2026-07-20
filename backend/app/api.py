@@ -262,7 +262,10 @@ def create_patient(data:PatientIn,user:User=Depends(professional),db:Session=Dep
     sync_patient_finance(db,item)
     audit(db,user,"create","patient"); db.commit(); db.refresh(item); return item
 @router.get("/patients/{patient_id}",response_model=PatientOut)
-def get_patient(patient_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)): return owned(db,Patient,patient_id,user)
+def get_patient(patient_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    item=owned(db,Patient,patient_id,user)
+    if user.role==Role.FAMILY and item.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
+    return item
 @router.patch("/patients/{patient_id}",response_model=PatientOut)
 def update_patient(patient_id:str,data:PatientIn,user:User=Depends(professional),db:Session=Depends(get_db)):
     item=owned(db,Patient,patient_id,user)
