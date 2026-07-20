@@ -100,7 +100,7 @@ class ResponsibleOut(ResponsibleIn, Out):
     @field_validator("phone",mode="before")
     @classmethod
     def valid_phone(cls,value): return "".join(filter(str.isdigit,value)) if value else value
-class VisitIn(BaseModel): patient_id:str; starts_at:datetime; duration_minutes:int=60; notes:str|None=None
+class VisitIn(BaseModel): patient_id:str; professional_id:str|None=None; starts_at:datetime; duration_minutes:int=Field(default=60,ge=15,le=1440); notes:str|None=None
 class VisitOut(Out): id:str; patient_id:str; professional_id:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; notes:str|None; confirmation_manual_sent_at:datetime|None; confirmation_automatic_sent_at:datetime|None; patient_response:str|None; patient_responded_at:datetime|None; patient:PatientOut
 class RecordIn(BaseModel): patient_id:str; visit_id:str|None=None; occurred_at:datetime|None=None; summary:str; guidance:str|None=None; weight_kg:Decimal|None=Field(default=None,gt=0,le=500); blood_pressure_systolic:int|None=Field(default=None,ge=40,le=300); blood_pressure_diastolic:int|None=Field(default=None,ge=20,le=200); heart_rate_bpm:int|None=Field(default=None,ge=20,le=300); respiratory_rate_bpm:int|None=Field(default=None,ge=4,le=100); temperature_c:Decimal|None=Field(default=None,ge=25,le=45); oxygen_saturation_percent:int|None=Field(default=None,ge=50,le=100); blood_glucose_mg_dl:int|None=Field(default=None,ge=20,le=1000); responsible_name:str|None=None; signature_data:str|None=None
 class RecordOut(RecordIn,Out): id:str; professional_id:str; occurred_at:datetime; professional_signature_name:str|None; professional_signature_council:str|None; professional_signature_profession:str|None; patient:PatientOut
@@ -111,6 +111,10 @@ class VisitConfirmationLink(BaseModel): url:str
 class PublicVisitOut(BaseModel): patient_name:str; professional_name:str; starts_at:datetime; duration_minutes:int; status:VisitStatus; patient_response:str|None
 class VisitResponseIn(BaseModel): action:Literal["confirm","cancel","reschedule"]; new_starts_at:datetime|None=None
 class AvailableSlot(BaseModel): starts_at:datetime; ends_at:datetime
+class AttendanceAction(BaseModel): latitude:float=Field(ge=-90,le=90);longitude:float=Field(ge=-180,le=180);accuracy_meters:float|None=Field(default=None,ge=0,le=10000);notes:str|None=Field(default=None,max_length=1000)
+class AttendanceOut(Out): id:str;visit_id:str;professional_id:str;check_in_at:datetime;check_in_latitude:float;check_in_longitude:float;check_in_accuracy_meters:float|None;check_in_distance_meters:float|None;location_verified:bool;check_out_at:datetime|None;check_out_latitude:float|None;check_out_longitude:float|None;check_out_accuracy_meters:float|None;notes:str|None;visit:VisitOut
+class HandoffIn(BaseModel): condition_summary:str=Field(min_length=3,max_length=5000);procedures:str|None=Field(default=None,max_length=5000);medications:str|None=Field(default=None,max_length=5000);occurrences:str|None=Field(default=None,max_length=5000);pending_items:str|None=Field(default=None,max_length=5000);next_shift_guidance:str|None=Field(default=None,max_length=5000)
+class HandoffOut(HandoffIn,Out): id:str;visit_id:str;patient_id:str;professional_id:str;created_at:datetime;updated_at:datetime;patient:PatientOut
 class FinanceIn(BaseModel): patient_id:str|None=None; entry_type:Literal["income","expense"]="income"; category:str=Field(default="Outros",min_length=2,max_length=60); description:str; amount:Decimal=Field(gt=0); due_date:date; paid:bool=False
 class FinanceOut(FinanceIn, Out): id:str; source:str|None=None; patient:PatientOut|None=None
 class Dashboard(BaseModel): patients:int; upcoming_visits:int; revenue_last_30_days:Decimal; receivable_next_30_days:Decimal

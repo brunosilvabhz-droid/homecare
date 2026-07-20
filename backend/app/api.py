@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone, time, timedelta
-import base64, binascii, hashlib, secrets, io, html
+import base64, binascii, hashlib, secrets, io, html, math
 import json
 import logging
 from google.auth.transport import requests as google_requests
@@ -24,7 +24,7 @@ from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
 from app.core.ai import generate_analysis
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog, ContextMessageInteraction, ExitSurveyResponse, CompanyInvitation
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog, ContextMessageInteraction, ExitSurveyResponse, CompanyInvitation, WorkAttendance, ShiftHandoff
 from app.relationship_automation import ensure_templates
 from app.onboarding import event as product_event, status as onboarding_status
 from app.schemas import *
@@ -37,6 +37,31 @@ def audit(db,user,action,resource): db.add(AuditLog(organization_id=user.organiz
 def is_expired(value:datetime)->bool:
     now=datetime.now(timezone.utc)
     return value < (now.replace(tzinfo=None) if value.tzinfo is None else now)
+def distance_meters(lat1:float,lon1:float,lat2:float,lon2:float)->float:
+    radius=6371000;phi1,phi2=math.radians(lat1),math.radians(lat2);dphi=math.radians(lat2-lat1);dlambda=math.radians(lon2-lon1)
+    value=math.sin(dphi/2)**2+math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return radius*2*math.atan2(math.sqrt(value),math.sqrt(1-value))
+def assigned_visit(db:Session,visit_id:str,user:User)->Visit:
+    item=owned(db,Visit,visit_id,user)
+    if item.professional_id!=user.id: raise HTTPException(403,"Este atendimento está atribuído a outro profissional")
+    return item
+def aware(value:datetime)->datetime: return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+def ensure_no_schedule_conflict(db:Session,professional_id:str,starts_at:datetime,duration_minutes:int,ignore_visit_id:str|None=None):
+    start=aware(starts_at);end=start+timedelta(minutes=duration_minutes)
+    candidates=db.scalars(select(Visit).where(Visit.professional_id==professional_id,Visit.status!=VisitStatus.CANCELED,Visit.starts_at>=start-timedelta(days=1),Visit.starts_at<=end+timedelta(days=1))).all()
+    for current in candidates:
+        if current.id==ignore_visit_id: continue
+        current_start=aware(current.starts_at);current_end=current_start+timedelta(minutes=current.duration_minutes)
+        if current_start<end and current_end>start: raise HTTPException(409,"O profissional já possui atendimento neste horário")
+def ensure_patient_access(db:Session,patient:Patient,user:User):
+    if user.role==Role.FAMILY and patient.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
+    organization=db.get(Organization,user.organization_id)
+    if organization and organization.account_type=="company" and user.role==Role.PROFESSIONAL:
+        assigned=db.scalar(select(Visit.id).where(Visit.organization_id==user.organization_id,Visit.patient_id==patient.id,Visit.professional_id==user.id).limit(1))
+        if not assigned: raise HTTPException(403,"Paciente não atribuído a este profissional")
+def ensure_patient_manager(db:Session,user:User):
+    organization=db.get(Organization,user.organization_id)
+    if organization and organization.account_type=="company" and user.role not in (Role.COMPANY_ADMIN,Role.COORDINATOR,Role.ADMIN): raise HTTPException(403,"Cadastro de pacientes restrito à gestão da empresa")
 def owned(db,model,id,user):
     item=db.scalar(select(model).where(model.id==id,model.organization_id==user.organization_id))
     if not item: raise HTTPException(404,"Recurso não encontrado")
@@ -328,9 +353,15 @@ def dashboard_finance_chart(days:int=30,user:User=Depends(professional),db:Sessi
 def patients(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(Patient).where(Patient.organization_id==user.organization_id)
     if user.role==Role.FAMILY: q=q.where(Patient.family_user_id==user.id)
+    else:
+        organization=db.get(Organization,user.organization_id)
+        if organization and organization.account_type=="company" and user.role==Role.PROFESSIONAL:
+            assigned=select(Visit.patient_id).where(Visit.organization_id==user.organization_id,Visit.professional_id==user.id)
+            q=q.where(Patient.id.in_(assigned))
     return db.scalars(q.order_by(Patient.name)).all()
 @router.post("/patients",response_model=PatientOut,status_code=201)
 def create_patient(data:PatientIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+    ensure_patient_manager(db,user)
     values=data.model_dump(exclude={"responsible"}); item=Patient(**values,organization_id=user.organization_id); db.add(item); db.flush()
     if data.responsible:
         db.add(Responsible(**data.responsible.model_dump(),patient_id=item.id,organization_id=user.organization_id))
@@ -339,10 +370,11 @@ def create_patient(data:PatientIn,user:User=Depends(professional),db:Session=Dep
 @router.get("/patients/{patient_id}",response_model=PatientOut)
 def get_patient(patient_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     item=owned(db,Patient,patient_id,user)
-    if user.role==Role.FAMILY and item.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
+    ensure_patient_access(db,item,user)
     return item
 @router.patch("/patients/{patient_id}",response_model=PatientOut)
 def update_patient(patient_id:str,data:PatientIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+    ensure_patient_manager(db,user)
     item=owned(db,Patient,patient_id,user)
     for key,value in data.model_dump(exclude={"responsible"}).items(): setattr(item,key,value)
     if data.responsible:
@@ -353,6 +385,7 @@ def update_patient(patient_id:str,data:PatientIn,user:User=Depends(professional)
     sync_patient_finance(db,item); audit(db,user,"update","patient"); db.commit(); db.refresh(item); return item
 @router.post("/patients/{patient_id}/portal-invite",response_model=Message)
 def invite_patient_portal(patient_id:str,data:PatientPortalInvite,user:User=Depends(professional),db:Session=Depends(get_db)):
+    ensure_patient_manager(db,user)
     patient=owned(db,Patient,patient_id,user); email=str(data.email).lower()
     family=db.scalar(select(User).where(User.email==email))
     if family and (family.organization_id!=user.organization_id or family.role!=Role.FAMILY): raise HTTPException(409,"Este e-mail já está vinculado a outra conta")
@@ -373,10 +406,66 @@ def create_responsible(data:ResponsibleIn,user:User=Depends(professional),db:Ses
 def visits(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(Visit).join(Patient).where(Visit.organization_id==user.organization_id)
     if user.role==Role.FAMILY: q=q.where(Patient.family_user_id==user.id)
+    else:
+        organization=db.get(Organization,user.organization_id)
+        if organization and organization.account_type=="company" and user.role==Role.PROFESSIONAL: q=q.where(Visit.professional_id==user.id)
     return db.scalars(q.order_by(Visit.starts_at)).all()
 @router.post("/visits",response_model=VisitOut,status_code=201)
 def create_visit(data:VisitIn,user:User=Depends(professional),db:Session=Depends(get_db)):
-    owned(db,Patient,data.patient_id,user); item=Visit(**data.model_dump(),professional_id=user.id,organization_id=user.organization_id); db.add(item); audit(db,user,"create","visit"); db.commit(); db.refresh(item); return item
+    owned(db,Patient,data.patient_id,user);organization=db.get(Organization,user.organization_id);professional_id=user.id
+    if data.professional_id and data.professional_id!=user.id:
+        if not organization or organization.account_type!="company" or user.role not in (Role.COMPANY_ADMIN,Role.COORDINATOR,Role.ADMIN): raise HTTPException(403,"Você não pode agendar para outro profissional")
+        assignee=db.scalar(select(User).where(User.id==data.professional_id,User.organization_id==user.organization_id,User.role.in_((Role.PROFESSIONAL,Role.COORDINATOR)),User.is_active.is_(True)))
+        if not assignee: raise HTTPException(422,"Profissional inválido ou desativado")
+        professional_id=assignee.id
+    ensure_no_schedule_conflict(db,professional_id,data.starts_at,data.duration_minutes)
+    values=data.model_dump(exclude={"professional_id"});item=Visit(**values,professional_id=professional_id,organization_id=user.organization_id); db.add(item); audit(db,user,"create","visit"); db.commit(); db.refresh(item); return item
+@router.get("/attendance/me",response_model=list[AttendanceOut])
+def my_attendance(date_from:date|None=None,date_to:date|None=None,user:User=Depends(professional),db:Session=Depends(get_db)):
+    start=date_from or datetime.now(LOCAL_TZ).date()-timedelta(days=7);end=date_to or datetime.now(LOCAL_TZ).date()+timedelta(days=1)
+    start_at=datetime.combine(start,time.min,tzinfo=LOCAL_TZ).astimezone(timezone.utc);end_at=datetime.combine(end,time.max,tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    return db.scalars(select(WorkAttendance).join(Visit).where(WorkAttendance.organization_id==user.organization_id,WorkAttendance.professional_id==user.id,Visit.starts_at>=start_at,Visit.starts_at<=end_at).order_by(WorkAttendance.check_in_at.desc())).all()
+@router.get("/company/attendance",response_model=list[AttendanceOut])
+def company_attendance(date_from:date|None=None,date_to:date|None=None,user:User=Depends(company_manager),db:Session=Depends(get_db)):
+    start=date_from or datetime.now(LOCAL_TZ).date()-timedelta(days=7);end=date_to or datetime.now(LOCAL_TZ).date()+timedelta(days=1)
+    start_at=datetime.combine(start,time.min,tzinfo=LOCAL_TZ).astimezone(timezone.utc);end_at=datetime.combine(end,time.max,tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    return db.scalars(select(WorkAttendance).join(Visit).where(WorkAttendance.organization_id==user.organization_id,Visit.starts_at>=start_at,Visit.starts_at<=end_at).order_by(WorkAttendance.check_in_at.desc())).all()
+@router.post("/visits/{visit_id}/check-in",response_model=AttendanceOut,status_code=201)
+def visit_check_in(visit_id:str,data:AttendanceAction,user:User=Depends(professional),db:Session=Depends(get_db)):
+    visit=assigned_visit(db,visit_id,user)
+    if visit.status==VisitStatus.CANCELED: raise HTTPException(409,"Não é possível registrar ponto em atendimento cancelado")
+    if db.scalar(select(WorkAttendance).where(WorkAttendance.visit_id==visit.id)): raise HTTPException(409,"A entrada deste atendimento já foi registrada")
+    patient=visit.patient;distance=None;verified=False
+    if patient.latitude is not None and patient.longitude is not None:
+        distance=distance_meters(data.latitude,data.longitude,patient.latitude,patient.longitude)
+        if distance>500: raise HTTPException(409,f"Você está a aproximadamente {round(distance)} metros do local do atendimento")
+        verified=True
+    item=WorkAttendance(organization_id=user.organization_id,visit_id=visit.id,professional_id=user.id,check_in_latitude=data.latitude,check_in_longitude=data.longitude,check_in_accuracy_meters=data.accuracy_meters,check_in_distance_meters=distance,location_verified=verified,notes=data.notes);db.add(item);audit(db,user,"check_in","visit");db.commit();db.refresh(item);return item
+@router.post("/visits/{visit_id}/check-out",response_model=AttendanceOut)
+def visit_check_out(visit_id:str,data:AttendanceAction,user:User=Depends(professional),db:Session=Depends(get_db)):
+    visit=assigned_visit(db,visit_id,user);item=db.scalar(select(WorkAttendance).where(WorkAttendance.visit_id==visit.id,WorkAttendance.professional_id==user.id))
+    if not item: raise HTTPException(409,"Registre a entrada antes da saída")
+    if item.check_out_at: raise HTTPException(409,"A saída deste atendimento já foi registrada")
+    item.check_out_at=datetime.now(timezone.utc);item.check_out_latitude=data.latitude;item.check_out_longitude=data.longitude;item.check_out_accuracy_meters=data.accuracy_meters
+    if data.notes: item.notes=data.notes
+    audit(db,user,"check_out","visit");db.commit();db.refresh(item);return item
+@router.get("/handoffs",response_model=list[HandoffOut])
+def handoffs(patient_id:str|None=None,user:User=Depends(professional),db:Session=Depends(get_db)):
+    q=select(ShiftHandoff).join(Visit).where(ShiftHandoff.organization_id==user.organization_id)
+    organization=db.get(Organization,user.organization_id)
+    if organization and organization.account_type=="company" and user.role==Role.PROFESSIONAL:
+        assigned_patients=select(Visit.patient_id).where(Visit.organization_id==user.organization_id,Visit.professional_id==user.id)
+        q=q.where(ShiftHandoff.patient_id.in_(assigned_patients))
+    if patient_id: q=q.where(ShiftHandoff.patient_id==patient_id)
+    return db.scalars(q.order_by(ShiftHandoff.created_at.desc())).all()
+@router.put("/visits/{visit_id}/handoff",response_model=HandoffOut)
+def save_handoff(visit_id:str,data:HandoffIn,user:User=Depends(professional),db:Session=Depends(get_db)):
+    visit=assigned_visit(db,visit_id,user);item=db.scalar(select(ShiftHandoff).where(ShiftHandoff.visit_id==visit.id));values=data.model_dump()
+    if item:
+        for key,value in values.items(): setattr(item,key,value)
+    else:
+        item=ShiftHandoff(**values,organization_id=user.organization_id,visit_id=visit.id,patient_id=visit.patient_id,professional_id=user.id);db.add(item)
+    audit(db,user,"save","shift_handoff");db.commit();db.refresh(item);return item
 @router.get("/availability",response_model=AvailabilityOut)
 def get_availability(user:User=Depends(professional),db:Session=Depends(get_db)):
     windows=db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==user.id).order_by(ProfessionalAvailability.weekday,ProfessionalAvailability.start_time)).all()
@@ -471,16 +560,21 @@ def cancel_visit(visit_id:str,user:User=Depends(professional),db:Session=Depends
 def records(user:User=Depends(current_user),db:Session=Depends(get_db)):
     q=select(ServiceRecord).join(Patient).where(ServiceRecord.organization_id==user.organization_id)
     if user.role==Role.FAMILY: q=q.where(Patient.family_user_id==user.id)
+    else:
+        organization=db.get(Organization,user.organization_id)
+        if organization and organization.account_type=="company" and user.role==Role.PROFESSIONAL:
+            assigned_patients=select(Visit.patient_id).where(Visit.organization_id==user.organization_id,Visit.professional_id==user.id)
+            q=q.where(ServiceRecord.patient_id.in_(assigned_patients))
     return db.scalars(q.order_by(ServiceRecord.occurred_at.desc())).all()
 @router.get("/records/{record_id}",response_model=RecordOut)
 def record_detail(record_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     item=owned(db,ServiceRecord,record_id,user)
-    if user.role==Role.FAMILY and item.patient.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
+    ensure_patient_access(db,item.patient,user)
     return item
 @router.get("/records/{record_id}/pdf")
 def record_pdf(record_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     item=owned(db,ServiceRecord,record_id,user)
-    if user.role==Role.FAMILY and item.patient.family_user_id!=user.id: raise HTTPException(403,"Acesso não autorizado")
+    ensure_patient_access(db,item.patient,user)
     styles=getSampleStyleSheet();styles.add(ParagraphStyle(name="Notice",parent=styles["BodyText"],fontSize=8,textColor=colors.HexColor("#555555"),borderColor=colors.HexColor("#dddddd"),borderWidth=1,borderPadding=8,spaceBefore=12))
     buffer=io.BytesIO();document=SimpleDocTemplate(buffer,pagesize=A4,rightMargin=2*cm,leftMargin=2*cm,topMargin=2*cm,bottomMargin=2*cm,title="Registro de atendimento")
     safe=lambda value:html.escape(str(value or "—")).replace("\n","<br/>")
@@ -493,7 +587,7 @@ def record_pdf(record_id:str,user:User=Depends(current_user),db:Session=Depends(
     document.build(story);return Response(content=buffer.getvalue(),media_type="application/pdf",headers={"Content-Disposition":f'inline; filename="atendimento-{item.id}.pdf"'})
 @router.post("/records",response_model=RecordOut,status_code=201)
 def create_record(data:RecordIn,user:User=Depends(professional),db:Session=Depends(get_db)):
-    owned(db,Patient,data.patient_id,user); values=data.model_dump(exclude_none=True); item=ServiceRecord(**values,professional_id=user.id,organization_id=user.organization_id,professional_signature_name=user.signature_name or user.name,professional_signature_council=user.signature_council or " ".join(filter(None,[user.council_name,user.council_code,user.council_state])),professional_signature_profession=user.signature_profession or user.profession_other or user.profession); db.add(item); audit(db,user,"create","service_record"); db.commit(); db.refresh(item); return item
+    patient=owned(db,Patient,data.patient_id,user);ensure_patient_access(db,patient,user); values=data.model_dump(exclude_none=True); item=ServiceRecord(**values,professional_id=user.id,organization_id=user.organization_id,professional_signature_name=user.signature_name or user.name,professional_signature_council=user.signature_council or " ".join(filter(None,[user.council_name,user.council_code,user.council_state])),professional_signature_profession=user.signature_profession or user.profession_other or user.profession); db.add(item); audit(db,user,"create","service_record"); db.commit(); db.refresh(item); return item
 @router.get("/finance",response_model=list[FinanceOut])
 def finance(user:User=Depends(finance_manager),db:Session=Depends(get_db)): return db.scalars(select(FinanceEntry).where(FinanceEntry.organization_id==user.organization_id).order_by(FinanceEntry.due_date.desc())).all()
 @router.post("/finance",response_model=FinanceOut,status_code=201)

@@ -58,6 +58,21 @@ def test_company_registration_team_and_financial_permissions(monkeypatch):
     assert client.get("/api/v1/finance",headers=member_headers).status_code==403
     assert client.get("/api/v1/billing/subscription",headers=member_headers).status_code==403
     assert len(client.get("/api/v1/company/members",headers=admin_headers).json())==2
+    patient=client.post("/api/v1/patients",json={"name":"Paciente Empresarial","phone":"31999998888","latitude":-19.9191,"longitude":-43.9386},headers=admin_headers)
+    assert patient.status_code==201
+    starts_at=(datetime.now(ZoneInfo("UTC"))+timedelta(hours=2)).replace(microsecond=0)
+    visit_payload={"patient_id":patient.json()["id"],"professional_id":client.get("/api/v1/company/members",headers=admin_headers).json()[1]["id"],"starts_at":starts_at.isoformat(),"duration_minutes":60,"notes":"Escala empresarial"}
+    visit=client.post("/api/v1/visits",json=visit_payload,headers=admin_headers)
+    assert visit.status_code==201
+    assert client.post("/api/v1/visits",json=visit_payload,headers=admin_headers).status_code==409
+    assert client.get("/api/v1/patients",headers=member_headers).json()[0]["id"]==patient.json()["id"]
+    check_in=client.post(f"/api/v1/visits/{visit.json()['id']}/check-in",json={"latitude":-19.9191,"longitude":-43.9386,"accuracy_meters":12},headers=member_headers)
+    assert check_in.status_code==201 and check_in.json()["location_verified"] is True
+    check_out=client.post(f"/api/v1/visits/{visit.json()['id']}/check-out",json={"latitude":-19.9191,"longitude":-43.9386,"accuracy_meters":15},headers=member_headers)
+    assert check_out.status_code==200 and check_out.json()["check_out_at"]
+    handoff=client.put(f"/api/v1/visits/{visit.json()['id']}/handoff",json={"condition_summary":"Paciente estável ao final do período.","procedures":"Mobilização assistida.","pending_items":"Reavaliar dor no próximo período."},headers=member_headers)
+    assert handoff.status_code==200 and handoff.json()["patient_id"]==patient.json()["id"]
+    assert len(client.get("/api/v1/company/attendance",headers=admin_headers).json())==1
 def test_tenant_flow(monkeypatch):
     payload={"name":"Ana Souza","email":"ana@example.com","password":"segura123","organization_name":"Ana Cuidados","phone":"31999999999","cpf":"52998224725","profession":"nurse","council_name":"COREN","council_code":"123456","council_state":"MG","city":"Belo Horizonte","state":"MG","accept_lgpd":True}
     registered=client.post("/api/v1/auth/register",json=payload)
