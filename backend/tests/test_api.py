@@ -72,6 +72,14 @@ def test_company_registration_team_and_financial_permissions(monkeypatch):
     assert check_out.status_code==200 and check_out.json()["check_out_at"]
     handoff=client.put(f"/api/v1/visits/{visit.json()['id']}/handoff",json={"condition_summary":"Paciente estável ao final do período.","procedures":"Mobilização assistida.","pending_items":"Reavaliar dor no próximo período."},headers=member_headers)
     assert handoff.status_code==200 and handoff.json()["patient_id"]==patient.json()["id"]
+    overview=client.get("/api/v1/company/operations/overview",headers=admin_headers)
+    assert overview.status_code==200
+    assert overview.json()["completed_today"]==1
+    assert len(overview.json()["unread_handoffs"])==1
+    assert len(overview.json()["pending_records"])==1
+    read=client.post(f"/api/v1/company/operations/handoffs/{handoff.json()['id']}/read",json={},headers=admin_headers)
+    assert read.status_code==200
+    assert client.get("/api/v1/company/operations/overview",headers=admin_headers).json()["unread_handoffs"]==[]
     assert len(client.get("/api/v1/company/attendance",headers=admin_headers).json())==1
 def test_tenant_flow(monkeypatch):
     payload={"name":"Ana Souza","email":"ana@example.com","password":"segura123","organization_name":"Ana Cuidados","phone":"31999999999","cpf":"52998224725","profession":"nurse","council_name":"COREN","council_code":"123456","council_state":"MG","city":"Belo Horizonte","state":"MG","accept_lgpd":True}

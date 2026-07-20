@@ -115,6 +115,13 @@ class AttendanceAction(BaseModel): latitude:float=Field(ge=-90,le=90);longitude:
 class AttendanceOut(Out): id:str;visit_id:str;professional_id:str;check_in_at:datetime;check_in_latitude:float;check_in_longitude:float;check_in_accuracy_meters:float|None;check_in_distance_meters:float|None;location_verified:bool;check_out_at:datetime|None;check_out_latitude:float|None;check_out_longitude:float|None;check_out_accuracy_meters:float|None;notes:str|None;visit:VisitOut
 class HandoffIn(BaseModel): condition_summary:str=Field(min_length=3,max_length=5000);procedures:str|None=Field(default=None,max_length=5000);medications:str|None=Field(default=None,max_length=5000);occurrences:str|None=Field(default=None,max_length=5000);pending_items:str|None=Field(default=None,max_length=5000);next_shift_guidance:str|None=Field(default=None,max_length=5000)
 class HandoffOut(HandoffIn,Out): id:str;visit_id:str;patient_id:str;professional_id:str;created_at:datetime;updated_at:datetime;patient:PatientOut
+class OperationalVisitAlert(BaseModel):
+    visit_id:str;patient_id:str;patient_name:str;professional_id:str;professional_name:str;starts_at:datetime;minutes_late:int=0
+class OperationalHandoffAlert(BaseModel):
+    handoff_id:str;visit_id:str;patient_name:str;professional_name:str;condition_summary:str;pending_items:str|None=None;created_at:datetime
+class OperationalTomorrow(BaseModel): total:int;uncovered:int;fully_staffed:bool
+class OperationalOverview(BaseModel):
+    generated_at:datetime;delayed_visits:list[OperationalVisitAlert];absent_professionals:list[OperationalVisitAlert];unread_handoffs:list[OperationalHandoffAlert];completed_today:int;pending_records:list[OperationalVisitAlert];tomorrow:OperationalTomorrow
 class FinanceIn(BaseModel): patient_id:str|None=None; entry_type:Literal["income","expense"]="income"; category:str=Field(default="Outros",min_length=2,max_length=60); description:str; amount:Decimal=Field(gt=0); due_date:date; paid:bool=False
 class FinanceOut(FinanceIn, Out): id:str; source:str|None=None; patient:PatientOut|None=None
 class Dashboard(BaseModel): patients:int; upcoming_visits:int; revenue_last_30_days:Decimal; receivable_next_30_days:Decimal

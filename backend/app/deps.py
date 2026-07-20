@@ -26,6 +26,10 @@ def company_manager(user:User=Depends(current_user),db:Session=Depends(get_db)):
     organization=db.get(Organization,user.organization_id)
     if not organization or organization.account_type!="company" or user.role not in (Role.COMPANY_ADMIN,Role.ADMIN): raise HTTPException(403,"Acesso restrito ao administrador da empresa")
     return user
+def company_operator(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    organization=db.get(Organization,user.organization_id)
+    if not organization or organization.account_type!="company" or user.role not in (Role.COMPANY_ADMIN,Role.COORDINATOR,Role.ADMIN): raise HTTPException(403,"Acesso restrito à coordenação da empresa")
+    return user
 def financial_manager(user:User=Depends(account_professional),db:Session=Depends(get_db)):
     organization=db.get(Organization,user.organization_id)
     if organization and organization.account_type=="company" and user.role not in (Role.COMPANY_ADMIN,Role.ADMIN): raise HTTPException(403,"Financeiro disponível somente para o administrador da empresa")

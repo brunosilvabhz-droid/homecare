@@ -15,7 +15,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from app.db.session import get_db
-from app.deps import current_user, professional, account_professional, admin, company_manager, financial_manager, finance_manager
+from app.deps import current_user, professional, account_professional, admin, company_manager, company_operator, financial_manager, finance_manager
 from app.core.security import hash_password, verify_password, create_token, decode_email_token, decode_password_reset_token
 from app.core.email import send_verification_email, send_password_reset_email, send_support_ticket_email, send_visit_change_email, send_relationship_email
 from app.core.routing import geocode, calculate_route, money
@@ -24,7 +24,7 @@ from app.core.captcha import verify_turnstile
 from app.core.billing import create_asaas_checkout, cancel_asaas_subscription
 from app.core.subscriptions import subscription_access
 from app.core.ai import generate_analysis
-from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog, ContextMessageInteraction, ExitSurveyResponse, CompanyInvitation, WorkAttendance, ShiftHandoff
+from app.models import Organization, User, GoogleIdentity, Role, Patient, Responsible, Visit, ServiceRecord, FinanceEntry, SupportTicket, AuditLog, VisitStatus, Plan, Subscription, SubscriptionStatus, BillingCycle, Vehicle, IntakeRequest, BillingWebhookEvent, ProfessionalAvailability, SystemSetting, AIAnalysis, WhatsAppConfirmation, ProductEvent, CommunicationAutomation, CommunicationLog, ContextMessageInteraction, ExitSurveyResponse, CompanyInvitation, WorkAttendance, ShiftHandoff, HandoffRead
 from app.relationship_automation import ensure_templates
 from app.onboarding import event as product_event, status as onboarding_status
 from app.schemas import *
@@ -446,7 +446,7 @@ def visit_check_out(visit_id:str,data:AttendanceAction,user:User=Depends(profess
     visit=assigned_visit(db,visit_id,user);item=db.scalar(select(WorkAttendance).where(WorkAttendance.visit_id==visit.id,WorkAttendance.professional_id==user.id))
     if not item: raise HTTPException(409,"Registre a entrada antes da saída")
     if item.check_out_at: raise HTTPException(409,"A saída deste atendimento já foi registrada")
-    item.check_out_at=datetime.now(timezone.utc);item.check_out_latitude=data.latitude;item.check_out_longitude=data.longitude;item.check_out_accuracy_meters=data.accuracy_meters
+    item.check_out_at=datetime.now(timezone.utc);item.check_out_latitude=data.latitude;item.check_out_longitude=data.longitude;item.check_out_accuracy_meters=data.accuracy_meters;visit.status=VisitStatus.COMPLETED
     if data.notes: item.notes=data.notes
     audit(db,user,"check_out","visit");db.commit();db.refresh(item);return item
 @router.get("/handoffs",response_model=list[HandoffOut])
@@ -466,6 +466,46 @@ def save_handoff(visit_id:str,data:HandoffIn,user:User=Depends(professional),db:
     else:
         item=ShiftHandoff(**values,organization_id=user.organization_id,visit_id=visit.id,patient_id=visit.patient_id,professional_id=user.id);db.add(item)
     audit(db,user,"save","shift_handoff");db.commit();db.refresh(item);return item
+
+@router.get("/company/operations/overview",response_model=OperationalOverview)
+def company_operations_overview(user:User=Depends(company_operator),db:Session=Depends(get_db)):
+    now_utc=datetime.now(timezone.utc);local_now=now_utc.astimezone(LOCAL_TZ)
+    today_start=datetime.combine(local_now.date(),time.min,tzinfo=LOCAL_TZ).astimezone(timezone.utc);today_end=today_start+timedelta(days=1)
+    tomorrow_start=today_end;tomorrow_end=tomorrow_start+timedelta(days=1);recent_start=today_start-timedelta(days=7)
+    visits=db.scalars(select(Visit).where(Visit.organization_id==user.organization_id,Visit.starts_at>=recent_start,Visit.starts_at<tomorrow_end).order_by(Visit.starts_at)).all()
+    ids=[item.id for item in visits];attendance=db.scalars(select(WorkAttendance).where(WorkAttendance.visit_id.in_(ids))).all() if ids else []
+    attendance_by_visit={item.visit_id:item for item in attendance};recorded=set(db.scalars(select(ServiceRecord.visit_id).where(ServiceRecord.organization_id==user.organization_id,ServiceRecord.visit_id.in_(ids))).all()) if ids else set()
+    patient_ids={item.patient_id for item in visits};professional_ids={item.professional_id for item in visits}
+    patient_names={item.id:item.name for item in db.scalars(select(Patient).where(Patient.id.in_(patient_ids))).all()} if patient_ids else {}
+    professionals={item.id:item for item in db.scalars(select(User).where(User.id.in_(professional_ids))).all()} if professional_ids else {}
+    def alert(item:Visit,late:int=0):
+        professional=professionals.get(item.professional_id)
+        return OperationalVisitAlert(visit_id=item.id,patient_id=item.patient_id,patient_name=patient_names.get(item.patient_id,"Paciente"),professional_id=item.professional_id,professional_name=professional.name if professional else "Profissional não encontrado",starts_at=item.starts_at,minutes_late=max(0,late))
+    delayed=[];absent=[];pending=[];completed_ids=set()
+    for item in visits:
+        point=attendance_by_visit.get(item.id);minutes=int((now_utc-aware(item.starts_at)).total_seconds()//60)
+        if item.status==VisitStatus.SCHEDULED and not point and minutes>=60: absent.append(alert(item,minutes))
+        elif item.status==VisitStatus.SCHEDULED and not point and minutes>=15: delayed.append(alert(item,minutes))
+        if (item.status==VisitStatus.COMPLETED or (point and point.check_out_at)) and item.id not in recorded: pending.append(alert(item))
+        completed_now=bool(point and point.check_out_at and today_start<=aware(point.check_out_at)<today_end)
+        if completed_now or (item.status==VisitStatus.COMPLETED and today_start<=aware(item.starts_at)<today_end): completed_ids.add(item.id)
+    handoffs=db.scalars(select(ShiftHandoff).where(ShiftHandoff.organization_id==user.organization_id).order_by(ShiftHandoff.created_at.desc())).all()
+    read_ids=set(db.scalars(select(HandoffRead.handoff_id).where(HandoffRead.user_id==user.id)).all())
+    unread=[]
+    for item in handoffs:
+        if item.id in read_ids: continue
+        professional=professionals.get(item.professional_id) or db.get(User,item.professional_id)
+        unread.append(OperationalHandoffAlert(handoff_id=item.id,visit_id=item.visit_id,patient_name=item.patient.name,professional_name=professional.name if professional else "Profissional",condition_summary=item.condition_summary,pending_items=item.pending_items,created_at=item.created_at))
+    tomorrow=[item for item in visits if tomorrow_start<=aware(item.starts_at)<tomorrow_end and item.status!=VisitStatus.CANCELED]
+    uncovered=sum(1 for item in tomorrow if not (professionals.get(item.professional_id) and professionals[item.professional_id].is_active))
+    return OperationalOverview(generated_at=now_utc,delayed_visits=delayed,absent_professionals=absent,unread_handoffs=unread,completed_today=len(completed_ids),pending_records=pending,tomorrow=OperationalTomorrow(total=len(tomorrow),uncovered=uncovered,fully_staffed=bool(tomorrow) and uncovered==0))
+
+@router.post("/company/operations/handoffs/{handoff_id}/read")
+def mark_handoff_read(handoff_id:str,user:User=Depends(company_operator),db:Session=Depends(get_db)):
+    handoff=owned(db,ShiftHandoff,handoff_id,user)
+    if not db.scalar(select(HandoffRead).where(HandoffRead.handoff_id==handoff.id,HandoffRead.user_id==user.id)):
+        db.add(HandoffRead(organization_id=user.organization_id,handoff_id=handoff.id,user_id=user.id));audit(db,user,"read","shift_handoff");db.commit()
+    return {"status":"ok"}
 @router.get("/availability",response_model=AvailabilityOut)
 def get_availability(user:User=Depends(professional),db:Session=Depends(get_db)):
     windows=db.scalars(select(ProfessionalAvailability).where(ProfessionalAvailability.professional_id==user.id).order_by(ProfessionalAvailability.weekday,ProfessionalAvailability.start_time)).all()
